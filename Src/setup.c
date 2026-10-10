@@ -36,6 +36,7 @@
 #include "globals.h"
 #include "assert.h"
 #include "bullet.h"
+#include "server.h"
 #include "proto.h"
 #ifdef SOUND
 #include "sound.h"
@@ -256,22 +257,24 @@ play_game(void)
 		follow_mouse(ANIM_WIN, FALSE);
 #endif
 		if (settings.si.game != ULTIMATE_GAME) {
-			init_combatants();
+			/* Fresh match through the server-core lifecycle seam. */
+			if (server_match_init() == GAME_FAILED)
+				return GAME_FAILED;
 			newgame = TRUE;
+		} else {
+			if (setup_game(newgame) == GAME_FAILED)
+				return GAME_FAILED;
+			newgame = FALSE;
+
+			game_running = True;
 		}
-		if (setup_game(newgame) == GAME_FAILED)
-			return GAME_FAILED;
-		newgame = FALSE;
-
-
-		game_running = True;
 
 #ifdef SOUND
 		play_all(START_SOUND);
 #endif /* SOUND */
 
 		do {
-			status = animate();
+			status = server_step();
 		} while (status == GAME_RUNNING);
 
 #ifdef SOUND
@@ -282,8 +285,11 @@ play_game(void)
 
 		status = display_game_stats(status);
 
-		game_cleanup();			/* nuking all the vehicles here is overkill */
-	} while (status == GAME_RESET);
+		server_match_reset();	/* nuking all the vehicles here is overkill */
+	} while (status == GAME_RESET || server_lifecycle_continue());
+
+	if (server_lifecycle_active())
+		server_destroy();
 
 	/* Unmap battle windows and clear all other windows on all the terminals */
 	for (i = 0; i < num_terminals; i++) {
@@ -312,7 +318,7 @@ setup_game(Boolean newgame)
 {
 	int i;
 
-	frame = 0;
+	server_frame_reset();
 
 	/* Setup maze */
 	setup_maze();

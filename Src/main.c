@@ -27,6 +27,7 @@
 #include "xtank.h"
 #include "bullet.h"
 #include "clfkr.h"
+#include "server.h"
 #include "proto.h"
 
 #ifdef DEBUG
@@ -44,7 +45,6 @@ Maze maze;
 Map real_map;
 Settings settings;
 Boolean game_paused;
-int frame;						/* the game clock */
 char *executable_name;
 
 /****************************************************************************\
@@ -206,6 +206,17 @@ main(int argc, char *argv[])
 					  command_options.PrintScores = TRUE;
 					  break;
 
+				  case 'p':
+					  /* Explicit player-to-terminal binding (P1.6): replaces
+					     the display resource lookup / XTANK_NULL_PLAYERS test
+					     hook.  Names bind in terminal-creation order. */
+					  if (argc > ctr + 1) {
+						  iNumOpts++;
+						  (void) server_config_add_player(server_config(),
+														  argv[ctr + 1]);
+					  }
+					  break;
+
 				  case 'X':
 					  command_options.AutoExit = TRUE;
 					  break;
@@ -230,7 +241,7 @@ main(int argc, char *argv[])
 	}
 	/* Initialize various and sundry things */
 	debug("Initializing various things");
-	init_random();
+	server_init(server_config());
 	init_prog_descs();
 	init_vdesign();
 	init_settings();
@@ -252,7 +263,8 @@ main(int argc, char *argv[])
 	if (argc - iNumOpts > 1) {
 		for (i = 1; i < argc; i++) {
 			if (argv[i][0] == '-') {
-				if (argv[i][1] == 's' || argv[i][1] == 'F') {
+				if (argv[i][1] == 's' || argv[i][1] == 'F' ||
+					argv[i][1] == 'p') {
 					i++;
 				}
 				continue;

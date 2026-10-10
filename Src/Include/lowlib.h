@@ -115,6 +115,7 @@ extern void creat_harm P_((Weapon *, Loc *, Angle));
 extern void rdf_map P_((Box map[][GRID_HEIGHT]));
 extern SpecialStatus switch_special(SpecialType st, int action);
 extern void aim_smart_weapon P_((int x, int y));
+extern void lowlib_forget_vehicle P_((void));
 
 
 /* highlib.c */
