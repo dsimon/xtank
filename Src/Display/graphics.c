@@ -188,6 +188,10 @@ font_string_width(char *str, int font)
 #include "x11.c"
 #endif
 
+#ifdef NULL_BACKEND
+#include "null.c"
+#endif
+
 #ifdef AMIGA
 #include "amigagfx.c"
 #endif
