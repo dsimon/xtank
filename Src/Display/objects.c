@@ -29,6 +29,7 @@
 #include "xtank.h"
 #include "graphics.h"
 #include "gr.h"
+#include "object.h"
 #include "proto.h"
 
 #include "Objects/lightc.obj"
@@ -89,105 +90,113 @@ Object *random_obj[MAX_RANDOM_OBJS];
 int object_error;
 
 /*
-** Sets up all of the pixmaps in each object.
+** P1.10 -- the body/bitmap registry.
+**
+** This is the single place the static Objects and bitmap arrays from
+** Display/Objects/*.obj are visible.  Src/geometry.c consumes it to order
+** the bodies, rotate the 16 vehicle views and dump the geometry, all without
+** touching the video backend.  The sequence and indices below are exactly the
+** legacy make_objects() ordering (P1.5 behaviour), including the pulse-laser
+** bullet alias at index 18.
+*/
+const GeometryObject geometry_objects[] = {
+	/* Make all of the vehicle objects (HAK 2/93 order) */
+	{ GEOM_VEHICLE, &lightc_obj, lightc_bitmap },
+	{ GEOM_VEHICLE, &trike_obj, trike_bitmap },
+	{ GEOM_VEHICLE, &hexo_obj, hexo_bitmap },
+	{ GEOM_VEHICLE, &spider_obj, spider_bitmap },
+	{ GEOM_VEHICLE, &psycho_obj, psycho_bitmap },
+	{ GEOM_VEHICLE, &tornado_obj, tornado_bitmap },
+	{ GEOM_VEHICLE, &marauder_obj, marauder_bitmap },
+	{ GEOM_VEHICLE, &tiger_obj, tiger_bitmap },
+	{ GEOM_VEHICLE, &rhino_obj, rhino_bitmap },
+	{ GEOM_VEHICLE, &medusa_obj, medusa_bitmap },
+	{ GEOM_VEHICLE, &delta_obj, delta_bitmap },
+	{ GEOM_VEHICLE, &disk_obj, disk_bitmap },
+	{ GEOM_VEHICLE, &malice_obj, malice_bitmap },
+	{ GEOM_VEHICLE, &panzy_obj, panzy_bitmap },
+
+	/* Make all of the turret objects */
+	{ GEOM_TURRET, &turret_sm_obj, turret_sm_bitmap },
+
+	/* Make all of the explosion objects */
+	{ GEOM_EXPLOSION, &shock_obj, shock_bitmap },
+	{ GEOM_EXPLOSION, &gleam_obj, gleam_bitmap },
+	{ GEOM_EXPLOSION, &tink_obj, tink_bitmap },
+	{ GEOM_EXPLOSION, &soft_obj, soft_bitmap },
+	{ GEOM_EXPLOSION, &circle_obj, circle_bitmap },
+	{ GEOM_EXPLOSION, &fiery_obj, fiery_bitmap },
+	{ GEOM_EXPLOSION, &double_obj, double_bitmap },
+	{ GEOM_EXPLOSION, &exhaust_obj, exhaust_bitmap },
+	{ GEOM_EXPLOSION, &electric_obj, electric_bitmap },	/*GHS*/
+	{ GEOM_EXPLOSION, &nuke_obj, nuke_bitmap },
+
+	/* Make the bullet objects */
+	{ GEOM_BULLET, &lmg_obj, lmg_bitmap },
+	{ GEOM_BULLET, &mg_obj, mg_bitmap },
+	{ GEOM_BULLET, &hmg_obj, hmg_bitmap },
+	{ GEOM_BULLET, &lac_obj, lac_bitmap },
+	{ GEOM_BULLET, &ac_obj, ac_bitmap },
+	{ GEOM_BULLET, &hac_obj, hac_bitmap },
+	{ GEOM_BULLET, &lrl_obj, lrl_bitmap },
+	{ GEOM_BULLET, &rl_obj, rl_bitmap },
+	{ GEOM_BULLET, &hrl_obj, hrl_bitmap },
+	{ GEOM_BULLET, &as_obj, as_bitmap },
+	{ GEOM_BULLET, &ft_obj, ft_bitmap },
+	{ GEOM_BULLET, &seek_obj, seek_bitmap },
+	{ GEOM_BULLET, &pr_obj, pr_bitmap },
+	{ GEOM_BULLET, &um_obj, um_bitmap },
+	{ GEOM_BULLET, &tele_obj, tele_bitmap },
+	{ GEOM_BULLET, &tow_obj, tow_bitmap },
+	{ GEOM_BULLET, &ltorp_obj, ltorp_bitmap },
+	{ GEOM_BULLET, &bc_obj, bc_bitmap },
+	{ GEOM_BULLET, &lmg_obj, NULL },	/* pulse laser, no bitmap */
+	{ GEOM_BULLET, &mine_obj, mine_bitmap },
+	{ GEOM_BULLET, &slick_obj, slick_bitmap },
+	{ GEOM_BULLET, &mort_obj, mort_bitmap },
+	{ GEOM_BULLET, &tn_obj, tn_bitmap },
+	{ GEOM_BULLET, &harm_obj, harm_bitmap },
+	{ GEOM_BULLET, &disc_obj, disc_bitmap },
+
+	/* Make the landmark objects */
+	{ GEOM_LANDMARK, &anim_landmarks_obj, anim_landmarks_bitmap },
+	{ GEOM_LANDMARK, &map_landmarks_obj, map_landmarks_bitmap },
+	{ GEOM_LANDMARK, &design_landmarks_obj, design_landmarks_bitmap },
+
+	/* Make the random objects */
+	{ GEOM_RANDOM, &xtank_obj, xtank_bitmap },
+	{ GEOM_RANDOM, &team_obj, team_bitmap },
+	{ GEOM_RANDOM, &terp_obj, terp_bitmap },
+};
+
+const int geometry_num_objects =
+	sizeof(geometry_objects) / sizeof(geometry_objects[0]);
+
+/*
+** Sets up the body ordering and all of the pixmaps in each object.
+** The ordering and rotations (geometry.c) require no video backend; only the
+** pixmap upload touches the backend and is fully no-op under the null build.
 ** Returns 1 if a pixmap could not be made.
 */
 int
 make_objects(void)
 {
-	int num;
-	extern Object *make_object();
-
 	/* Clear the error flag */
 	object_error = 0;
 
-	/* Rearranged the order of these: (HAK 2/93) */
-	/* Make all of the vehicle objects */
-	num = 0;
-	vehicle_obj[num++] = make_object(&lightc_obj, lightc_bitmap);
-	vehicle_obj[num++] = make_object(&trike_obj, trike_bitmap);
-	vehicle_obj[num++] = make_object(&hexo_obj, hexo_bitmap);
-	vehicle_obj[num++] = make_object(&spider_obj, spider_bitmap);
-	vehicle_obj[num++] = make_object(&psycho_obj, psycho_bitmap);
-	vehicle_obj[num++] = make_object(&tornado_obj, tornado_bitmap);
-	vehicle_obj[num++] = make_object(&marauder_obj, marauder_bitmap);
-	vehicle_obj[num++] = make_object(&tiger_obj, tiger_bitmap);
-	vehicle_obj[num++] = make_object(&rhino_obj, rhino_bitmap);
-	vehicle_obj[num++] = make_object(&medusa_obj, medusa_bitmap);
-	vehicle_obj[num++] = make_object(&delta_obj, delta_bitmap);
-	vehicle_obj[num++] = make_object(&disk_obj, disk_bitmap);
-	vehicle_obj[num++] = make_object(&malice_obj, malice_bitmap);
-	vehicle_obj[num++] = make_object(&panzy_obj, panzy_bitmap);
-	num_vehicle_objs = num;
+	/* Order the bodies without allocating anything (P1.10). */
+	geometry_order_objects();
 
-
-	/* Make all of the turret objects */
-	turret_obj[0] = make_object(&turret_sm_obj, turret_sm_bitmap);
-	num_turret_objs = 1;
-
-	/* Make all of the explosion objects */
-	num_exp_objs = 0;
-	exp_obj[num_exp_objs++] = make_object(&shock_obj, shock_bitmap);
-	exp_obj[num_exp_objs++] = make_object(&gleam_obj, gleam_bitmap);
-	exp_obj[num_exp_objs++] = make_object(&tink_obj, tink_bitmap);
-	exp_obj[num_exp_objs++] = make_object(&soft_obj, soft_bitmap);
-	exp_obj[num_exp_objs++] = make_object(&circle_obj, circle_bitmap);
-	exp_obj[num_exp_objs++] = make_object(&fiery_obj, fiery_bitmap);
-	exp_obj[num_exp_objs++] = make_object(&double_obj, double_bitmap);
-	exp_obj[num_exp_objs++] = make_object(&exhaust_obj, exhaust_bitmap);
-	/*GHS*/
-	exp_obj[num_exp_objs++] = make_object(&electric_obj, electric_bitmap);
-	exp_obj[num_exp_objs++] = make_object(&nuke_obj, nuke_bitmap);
-
-	if(num_exp_objs != MAX_EXP_OBJS)
+	if (num_exp_objs != MAX_EXP_OBJS)
 		printf("Yikes!!!!  MAX_EXP_OBJS mismatched!\n");
-
-	/* Make the bullet object */
-/*
-	bullet_obj = make_object(&all_bullets_obj, all_bullets_bitmap);
-*/
-	num_bullet_objs = 0;
-	bullet_obj[num_bullet_objs++] = make_object(&lmg_obj, lmg_bitmap);
-	bullet_obj[num_bullet_objs++] = make_object(&mg_obj, mg_bitmap);
-	bullet_obj[num_bullet_objs++] = make_object(&hmg_obj, hmg_bitmap);
-	bullet_obj[num_bullet_objs++] = make_object(&lac_obj, lac_bitmap);
-	bullet_obj[num_bullet_objs++] = make_object(&ac_obj, ac_bitmap);
-	bullet_obj[num_bullet_objs++] = make_object(&hac_obj, hac_bitmap);
-	bullet_obj[num_bullet_objs++] = make_object(&lrl_obj, lrl_bitmap);
-	bullet_obj[num_bullet_objs++] = make_object(&rl_obj, rl_bitmap);
-	bullet_obj[num_bullet_objs++] = make_object(&hrl_obj, hrl_bitmap);
-	bullet_obj[num_bullet_objs++] = make_object(&as_obj, as_bitmap);
-	bullet_obj[num_bullet_objs++] = make_object(&ft_obj, ft_bitmap);
-	bullet_obj[num_bullet_objs++] = make_object(&seek_obj, seek_bitmap);
-	bullet_obj[num_bullet_objs++] = make_object(&pr_obj, pr_bitmap);
-	bullet_obj[num_bullet_objs++] = make_object(&um_obj, um_bitmap);
-	bullet_obj[num_bullet_objs++] = make_object(&tele_obj, tele_bitmap);
-	bullet_obj[num_bullet_objs++] = make_object(&tow_obj, tow_bitmap);
-	bullet_obj[num_bullet_objs++] = make_object(&ltorp_obj, ltorp_bitmap);
-	bullet_obj[num_bullet_objs++] = make_object(&bc_obj, bc_bitmap);
-	bullet_obj[num_bullet_objs++] = bullet_obj[0];/* pulse laser, no bitmap */
-	bullet_obj[num_bullet_objs++] = make_object(&mine_obj, mine_bitmap);
-	bullet_obj[num_bullet_objs++] = make_object(&slick_obj, slick_bitmap);
-	bullet_obj[num_bullet_objs++] = make_object(&mort_obj, mort_bitmap);
-	bullet_obj[num_bullet_objs++] = make_object(&tn_obj, tn_bitmap);
-	bullet_obj[num_bullet_objs++] = make_object(&harm_obj, harm_bitmap);
-	bullet_obj[num_bullet_objs++] = make_object(&disc_obj, disc_bitmap);
-
-	if(num_bullet_objs != NUM_BULLET_OBJS)
+	if (num_bullet_objs != NUM_BULLET_OBJS)
 		printf("Yikes!!!!  NUM_BULLET_OBJS mismatched!\n");
 
-	/* Make the landmark objects */
-	landmark_obj[0] = make_object(&anim_landmarks_obj, anim_landmarks_bitmap);
-	landmark_obj[1] = make_object(&map_landmarks_obj, map_landmarks_bitmap);
-	landmark_obj[2] = make_object(&design_landmarks_obj,
-								  design_landmarks_bitmap);
-	num_landmark_objs = 3;
+	/* Upload the pictures through the backend (X pixmaps; no-op under null). */
+	geometry_upload_objects();
 
-	/* Make the random objects */
-	random_obj[XTANK_OBJ] = make_object(&xtank_obj, xtank_bitmap);
-	random_obj[TEAM_OBJ] = make_object(&team_obj, team_bitmap);
-	random_obj[TERP_OBJ] = make_object(&terp_obj, terp_bitmap);
-	num_random_objs = 3;
+	/* Harness-only: emit the explicit geometry table if requested. */
+	(void) geometry_test_dump();
 
 	return object_error;
 }
@@ -247,53 +256,12 @@ free_object(Object *obj)
 }
 
 /*
-** Rotates all the vehicle objects to so that all 16 rotations exist.
+** Rotates all the vehicle objects so that all 16 rotations exist.
+** The pure rotation math lives in Src/geometry.c (P1.10); this only enters
+** the shared geometry module so the legacy call site in main() is unchanged.
 */
 void
 rotate_objects(void)
 {
-	/* Rotate all of the vehicle objects */
-	rotate_object(&lightc_obj, lightc_bitmap);
-	rotate_object(&hexo_obj, hexo_bitmap);
-	rotate_object(&spider_obj, spider_bitmap);
-	rotate_object(&psycho_obj, psycho_bitmap);
-	rotate_object(&tornado_obj, tornado_bitmap);
-	rotate_object(&marauder_obj, marauder_bitmap);
-	rotate_object(&tiger_obj, tiger_bitmap);
-	rotate_object(&rhino_obj, rhino_bitmap);
-	rotate_object(&medusa_obj, medusa_bitmap);
-	rotate_object(&malice_obj, malice_bitmap);
-	rotate_object(&trike_obj, trike_bitmap);
-	rotate_object(&panzy_obj, panzy_bitmap);
-	rotate_object(&disk_obj, disk_bitmap);
-	rotate_object(&delta_obj, delta_bitmap);
-}
-
-/*
-** Creates the 12 missing rotations from the first 4 rotations
-** for every vehicle object.  This is done by 90 degree and 180
-** degree rotations.
-*/
-void
-rotate_object(Object *obj, Bits **bitmap)
-{
-	Picture *pic, *rot_pic;
-	Bits *rotate_pic_90(), *rotate_pic_180();
-	int dest, source;
-
-	/* Create next 4 pictures by rotating the first 4 by 90 degrees */
-	for (source = 0; source < 4; source++) {
-		dest = source + 4;
-		pic = &obj->pic[source];
-		rot_pic = &obj->pic[dest];
-		bitmap[dest] = (Bits *) rotate_pic_90(pic, rot_pic, bitmap[source]);
-	}
-
-	/* Create last 8 pictures by rotating the first 8 by 180 degrees */
-	for (source = 0; source < 8; source++) {
-		dest = source + 8;
-		pic = &obj->pic[source];
-		rot_pic = &obj->pic[dest];
-		bitmap[dest] = (Bits *) rotate_pic_180(pic, rot_pic, bitmap[source]);
-	}
+	geometry_rotate_objects();
 }

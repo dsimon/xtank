@@ -1,0 +1,12 @@
+# P1.10 frozen extreme geometry table.
+#
+# The table is fully determined by the read-only body descriptions in
+# Src/Display/Objects/*.obj (base views 0-3: bounds/offsets, turret
+# coordinates and collision segments) plus the verbatim 90/180 rotation
+# formulas in Src/geometry.c (derived views 4-15).  It carries no video or
+# pixmap state, so the X-linked and null/server-linked builds must produce it
+# byte for byte.
+#
+# Regenerate deliberately (review the diff first) with:
+#   XTANK_P1_REGEN_GEOMETRY_GOLDEN=1 bash Tests/phase1/geometry.sh
+table 9a280594828b29572d51abfb2159ca546d2f785e451b0768a30d5ce8fa51cda1

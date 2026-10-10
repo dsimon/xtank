@@ -32,6 +32,8 @@
 #ifndef _OBJECT_H_
 #define _OBJECT_H_
 
+#include <stdio.h>
+
 #include "tanktypes.h"
 #include "tanklimits.h"
 
@@ -84,7 +86,48 @@ Picture;
   }
 Object;
 
-extern int num_vehicle_objs, num_exp_objs, num_bullet_objs;
-extern Object *vehicle_obj[], *bullet_obj[], *exp_obj[], *landmark_obj[], *random_obj[];
+extern int num_vehicle_objs, num_turret_objs, num_exp_objs, num_bullet_objs;
+extern int num_landmark_objs, num_random_objs;
+extern Object *vehicle_obj[], *turret_obj[], *bullet_obj[], *exp_obj[];
+extern Object *landmark_obj[], *random_obj[];
+
+extern int object_error;
+
+/*
+** P1.10 -- headless geometry initialization.
+**
+** The object ordering table, the 16 vehicle rotations and the derived
+** picture bounds/offsets live in Src/geometry.c and operate on the read-only
+** body descriptions in Src/Display/Objects/*.obj without allocating any
+** video or pixmap resources.  Display/objects.c supplies the body/bitmap
+** registry (the only place the static .obj names are visible) and the X
+** front-end performs the pixmap upload separately via make_picture().
+*/
+
+/* Categories in the legacy make_objects() ordering. */
+#define GEOM_VEHICLE	0
+#define GEOM_TURRET	1
+#define GEOM_EXPLOSION	2
+#define GEOM_BULLET	3
+#define GEOM_LANDMARK	4
+#define GEOM_RANDOM	5
+
+typedef struct {
+	int kind;					/* GEOM_* */
+	Object *obj;				/* the body (static .obj object) */
+	Bits **bitmap;				/* per-picture bitmaps; NULL = alias */
+} GeometryObject;
+
+extern const GeometryObject geometry_objects[];
+extern const int geometry_num_objects;
+
+void geometry_order_objects(void);
+void geometry_rotate_objects(void);
+void geometry_rotate_object(Object *obj, Bits **bitmap);
+void geometry_upload_objects(void);
+int geometry_test_dump(void);
+void geometry_dump(FILE *fp);
+Byte *geometry_rotate_pic_90(Picture *, Picture *, Byte *);
+Byte *geometry_rotate_pic_180(Picture *, Picture *, Byte *);
 
 #endif /* ndef _OBJECT_H_ */

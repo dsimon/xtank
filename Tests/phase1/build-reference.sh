@@ -83,7 +83,7 @@ DEFS_BASE="-DUNIX -DS1024x864 -DKEYPAD_DETECT -DSTINGY_REDRAW \
 -DDYNALOAD -DMULTI_SYNC -DTHREAD_SWAPCONTEXT"
 
 SRCS_CORE="actions animate box camo collision cosell disc display escher \
-explosion file game gr highlib hit hud icounter init input interface \
+explosion file game geometry gr highlib hit hud icounter init input interface \
 intersect lowlib main mapper maze mdesign menu message newconsole newfile \
 newradar players program radar repair scroll server_core server_loop setup \
 setups status sysdep unix update util vdesign vehicle version lex.zz"

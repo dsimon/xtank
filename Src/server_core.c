@@ -56,6 +56,7 @@
 #include "intent.h"
 #include "vehicle.h"
 #include "terminal.h"
+#include "object.h"
 #include "proto.h"
 
 /*
@@ -182,6 +183,31 @@ server_seed_random(unsigned int seed)
 	init_random_seed(seed);
 }
 
+/*
+** Explicit simulation rate (P1.9).  XTANK_TICK_HZ overrides the config; the
+** display-free server defaults to SERVER_DEFAULT_TICK_HZ so the monotonic loop
+** owns pacing, while the X front-end keeps tick_hz == 0 and the legacy pacer.
+** A malformed value falls back to the default rather than aborting startup.
+*/
+static void
+server_config_tick_env(ServerConfig *cfg)
+{
+	const char *s = getenv("XTANK_TICK_HZ");
+	char *end;
+	long v;
+
+	if (s != NULL && *s != '\0') {
+		errno = 0;
+		v = strtol(s, &end, 10);
+		if (errno == 0 && end != s && *end == '\0' && v >= 0 && v <= 1000000)
+			cfg->tick_hz = (int) v;
+	}
+#ifdef NULL_BACKEND
+	if (cfg->tick_hz == 0)
+		cfg->tick_hz = SERVER_DEFAULT_TICK_HZ;
+#endif
+}
+
 void
 server_init(ServerConfig *cfg)
 {
@@ -189,6 +215,9 @@ server_init(ServerConfig *cfg)
 
 	if (cfg != NULL && cfg != &the_config)
 		the_config = *cfg;
+
+	server_config_tick_env(&the_config);
+	server_loop_configure(the_config.tick_hz);
 
 	if (the_config.seed_set) {
 		the_seed = the_config.seed;
@@ -225,14 +254,18 @@ server_frame_reset(void)
 }
 
 /*
-** Explicit, backend-independent tick pacing.  Delegates to the legacy
-** game-speed pacer (which is a no-op under -D replay); P1.9 replaces the
-** signal-based implementation behind this same seam.
+** Explicit, backend-independent tick pacing (P1.9).  When the monotonic loop
+** is active this is the absolute-deadline pacer; otherwise it falls back to
+** the legacy game-speed pacer so the X front-end is unchanged.  The production
+** loop calls server_loop_pace() directly around server_step().
 */
 void
 server_tick_pace(void)
 {
-	check_game_speed();
+	if (server_loop_active())
+		server_loop_pace(server_frame() + 1);
+	else
+		check_game_speed();
 }
 
 /*
@@ -252,6 +285,21 @@ server_match_seed(void)
 }
 
 /*
+** Headless geometry (P1.10): make sure the body ordering and the 16 vehicle
+** rotations exist before a match can advance, with no display, window or
+** pixmap involvement.  In the X front-end main() has already ordered and
+** rotated the bodies (and the null backend performed the no-op upload), so
+** both calls are idempotent there; a future display-free entry that builds no
+** terminal can rely on this to initialize its own geometry.
+*/
+static void
+server_geometry_init(void)
+{
+	geometry_order_objects();
+	geometry_rotate_objects();
+}
+
+/*
 ** Lifecycle: one match over the retained single-world globals.
 */
 int
@@ -262,6 +310,8 @@ server_match_init(void)
 
 	if (num_combatants == 0)
 		return GAME_FAILED;
+
+	server_geometry_init();
 
 	server_match_seed();
 
