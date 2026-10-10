@@ -76,6 +76,21 @@ GraphicsSegment;
 #define WIN_mapped      (1<<1)
 
 /*
+ * Pointer-input semantics (P1.4).
+ *
+ * The legacy callers in setup.c/interface.c enable button-release and mouse
+ * -motion tracking on the animation window, while menu.c toggles them only on
+ * backends that do not keep pointer input always on.  Both call sites were
+ * historically spelled with `#ifdef X11`/`#ifndef X11`.  The condition is
+ * named explicitly here so that removing -DX11 from server compilation
+ * (P1.5) cannot silently change X input handling; the X presentation backend
+ * defines it, and a later backend sets it to match its own input model.
+ */
+#ifdef X11
+#define GRAPHICS_POINTER_INPUT_ALWAYS_ON	1
+#endif
+
+/*
  * Opaque presentation state.  The concrete definition lives in the active
  * backend; only backend-private code may dereference it.
  */
@@ -85,10 +100,15 @@ typedef struct video Video;
 ** Backend operations **
 **********************/
 /*
- * The operations a presentation backend must supply.  Callers that still use
- * the legacy direct drawing API below are routed to the active backend; the
- * vtable exists so P1.4 can route batching, preferences, beep and
- * synchronization through it as well.
+ * The operations a presentation backend must supply.  The neutral entry
+ * points below (draw_*, beep/flush/sync, window-state accessors, font
+ * metrics) are defined in Src/Display/graphics.c and forward through the
+ * installed vtable; a concrete backend (Src/Display/x11.c) names its
+ * implementations x11_* and installs this table.
+ *
+ * Preferences (player/tank name, mouse, keymap, escher width, ...) are routed
+ * through the accessors declared at the bottom of this header rather than the
+ * table, because they are per-terminal state reads.
  */
 typedef struct GraphicsBackend {
 	const char *name;
@@ -112,7 +132,7 @@ typedef struct GraphicsBackend {
 	void (*sync_output) (Boolean discard);
 
 	int (*win_flags) (int w);
-	void (*expose_win) (int w, int status);
+	int (*expose_win) (int w, int status);
 	int (*mapped) (int w);
 	int (*color_display) (void);
 	int (*font_height) (int font);
@@ -143,10 +163,12 @@ int color_display(void);
 int video_win_flags(int w);
 
 /*
- * Batching hooks.  This build does not enable USE_BATCHED_* when the legacy
- * drawing macros are defined (the #define follows the graphics.h include), so
- * these are empty exactly as before; P1.4 will move batching behind the
- * backend.
+ * Batching hooks.  USE_BATCHED_POINTS/USE_BATCHED_LINES are not defined in
+ * the supported build (the legacy guard sits in the backend-private x11.h and
+ * these macros are empty there), so callers see no-ops exactly as in the
+ * pinned build.  The draw entry points above already route through the
+ * backend, so enabling real batching is a backend-local change that does not
+ * touch callers.
  */
 #define flush_point_batch
 #define flush_line_batch

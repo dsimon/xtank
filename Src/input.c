@@ -40,7 +40,6 @@
 
 extern Terminal *term;
 extern Settings settings;
-extern Video *vid;
 
 /*
  * Non-linear (x*x) speed computation, gives greater control over vehicle
@@ -171,7 +170,7 @@ anim_input(Event *event)
 					}
 					break;
 				case 'B':  /* toggle beeps (HAK 2/93) */
-					if (vid->beep_flag = !vid->beep_flag)
+					if (video_toggle_beep())
 						beep_window();
 					break;
 				case '0':
@@ -264,7 +263,7 @@ anim_input(Event *event)
 #endif
 
 				case 'B':
-					if (vid->beep_flag = !vid->beep_flag)
+					if (video_toggle_beep())
 						beep_window();
 					break;
 				case '0':
@@ -550,7 +549,7 @@ get_reply(void)
 				  return '\r';
 			}
 		else
-			if(vid->win[ANIM_WIN].flags | WIN_exposed)
+			if(video_win_flags(ANIM_WIN) | WIN_exposed)
 				return -1;  /* window needs refresh */
 	}
 }

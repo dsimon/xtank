@@ -78,7 +78,7 @@ menu_bare_make(Menu_int *menuobj, int menuid, char *title,
 	m->numitem = size;			/* store the parameters of the menu */
 	/* m->offset = 0; */
 	if (use_escher) {
-		m->frame = vid->escher_width;
+		m->frame = video_escher_width();
 	} else {
 		m->frame = 1;
 	}
@@ -406,7 +406,7 @@ menu_adjust(Menu_int *menuobj, int menuid, Event *ev)
 	MAKE_M;
 
 	if (in_sbar(menuobj, menuid, ev->x, ev->y)) {
-		drag_scrollbar(&m->sbar, ev->x, ev->y, Button2);
+		drag_scrollbar(&m->sbar, ev->x, ev->y, EVENT_MBUTTON);
 		menu_redraw(menuobj, menuid);
 		return;
 	}
@@ -541,7 +541,7 @@ menu_track_mouse(Menu_int *menuobj, int menuid, int y)
 	if (!m->hil[curchoice])
 		menu_highlight(w, m, curchoice);
 
-#ifndef X11
+#ifndef GRAPHICS_POINTER_INPUT_ALWAYS_ON
 	button_up(w, TRUE);
 	follow_mouse(w, TRUE);
 #endif
@@ -581,7 +581,7 @@ menu_track_mouse(Menu_int *menuobj, int menuid, int y)
 		}
 	} while (down);
 
-#ifndef X11
+#ifndef GRAPHICS_POINTER_INPUT_ALWAYS_ON
 	button_up(w, FALSE);
 	follow_mouse(w, FALSE);
 #endif

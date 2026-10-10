@@ -251,7 +251,7 @@ play_game(void)
 		newgame = TRUE;
 	}
 	do {
-#ifdef X11
+#ifdef GRAPHICS_POINTER_INPUT_ALWAYS_ON
 		button_up(ANIM_WIN, FALSE);
 		follow_mouse(ANIM_WIN, FALSE);
 #endif
@@ -295,7 +295,7 @@ play_game(void)
 	/* Return to terminal 0 for the user interface */
 	set_terminal(0);
 
-#ifdef X11
+#ifdef GRAPHICS_POINTER_INPUT_ALWAYS_ON
 	button_up(ANIM_WIN, TRUE);
 	follow_mouse(ANIM_WIN, TRUE);
 #endif
