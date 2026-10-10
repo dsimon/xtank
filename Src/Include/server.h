@@ -92,6 +92,13 @@ void server_frame_reset(void);
 void server_seed_random(unsigned int seed);
 void server_tick_pace(void);
 
+/*
+ * Bounded player-intent queue seam (P1.7).  The queue is consumed exactly
+ * once per tick, after bot programs and before movement, by server_step();
+ * stale or malformed intents are rejected when submitted, never here.
+ */
+int server_consume_intents(int tick);
+
 /* Lifecycle bookkeeping used by the P1.6 lifecycle oracle only. */
 int server_lifecycle_active(void);
 int server_lifecycle_continue(void);

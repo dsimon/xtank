@@ -134,12 +134,25 @@ compile_tree() {
 	done
 	for f in $SRCS_THREADS; do cc_one "$src/Threads/$f.c"; done
 	for f in $SRCS_PROGS; do cc_one "$src/Programs/$f.c"; done
-	# P1.2 deterministic bot-free replay instrumentation (harness-owned).
-	echo "  CC $HARNESS/reference_input.c"
-	gcc -O0 -g -w $DEFS_BASE $extra_defs "${mode_defs[@]}" \
-	    "${inc[@]}" "${defs[@]}" \
-	    -c "$HARNESS/reference_input.c" -o "$obj/reference_input.o"
-	objs+=("$obj/reference_input.o")
+	# Deterministic bot-free input adapter.
+	#
+	# The frozen reference (and the pinned "before" baseline) has no P1.7
+	# source, so it compiles the harness-owned reference_input.c, which drives
+	# the legacy controls directly.  The candidate carries Src/intent.c (the
+	# bounded queue + its own adapter) and must NOT link reference_input.c, so
+	# the two input paths stay independent.
+	if [ -f "$src/intent.c" ]; then
+		echo "  CC $src/intent.c (candidate intent queue)"
+		gcc -O0 -g -w $DEFS_BASE $extra_defs "${mode_defs[@]}" \
+		    "${inc[@]}" "${defs[@]}" -c "$src/intent.c" -o "$obj/intent.o"
+		objs+=("$obj/intent.o")
+	else
+		echo "  CC $HARNESS/reference_input.c"
+		gcc -O0 -g -w $DEFS_BASE $extra_defs "${mode_defs[@]}" \
+		    "${inc[@]}" "${defs[@]}" \
+		    -c "$HARNESS/reference_input.c" -o "$obj/reference_input.o"
+		objs+=("$obj/reference_input.o")
+	fi
 	case "$mode" in
 	  headless)
 		cc_one "$SCRATCH/stubs.c"

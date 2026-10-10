@@ -52,6 +52,7 @@
 
 #include "xtank.h"
 #include "server.h"
+#include "intent.h"
 #include "vehicle.h"
 #include "terminal.h"
 #include "proto.h"
@@ -141,6 +142,8 @@ server_seed_random(unsigned int seed)
 void
 server_init(ServerConfig *cfg)
 {
+	intent_init();
+
 	if (cfg != NULL && cfg != &the_config)
 		the_config = *cfg;
 
@@ -201,6 +204,9 @@ server_match_init(void)
 	if (server_lifecycle_active() && have_seed)
 		server_seed_random(the_seed);
 
+	/* A fresh match starts with no queued or held player input. */
+	intent_reset();
+
 	init_combatants();
 	if (setup_game(TRUE) == GAME_FAILED)
 		return GAME_FAILED;
@@ -213,6 +219,17 @@ int
 server_step(void)
 {
 	return animate();
+}
+
+/*
+** Consume the player-intent queue for one tick.  Called from the animate()
+** seam after bot programs and before movement; every other phase is the
+** legacy one.  When no controller has submitted input this is a no-op.
+*/
+int
+server_consume_intents(int tick)
+{
+	return intent_consume(tick);
 }
 
 void
@@ -238,6 +255,9 @@ server_match_reset(void)
 			terminal[i]->vehicle = (Vehicle *) NULL;
 
 	lowlib_forget_vehicle();
+
+	/* Drop queued commands and every held control. */
+	intent_reset();
 }
 
 void
