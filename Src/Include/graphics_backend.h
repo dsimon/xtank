@@ -86,7 +86,7 @@ GraphicsSegment;
  * (P1.5) cannot silently change X input handling; the X presentation backend
  * defines it, and a later backend sets it to match its own input model.
  */
-#ifdef X11
+#if defined(X11) || defined(NULL_BACKEND)
 #define GRAPHICS_POINTER_INPUT_ALWAYS_ON	1
 #endif
 
