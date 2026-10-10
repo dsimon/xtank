@@ -67,11 +67,10 @@ draw_armor(int armor, Angle ang)
 
 	start -= (ang / (2 * PI)) * 360 + 90;
 
-	XDrawArc(vid->dpy, vid->win[ANIM_WIN].id,
-		 vid->graph_gc[DRAW_XOR][RED],
+	draw_arc(ANIM_WIN,
 		 (ANIM_WIN_WIDTH / 2) - (BBOX / 2),
 		 (ANIM_WIN_HEIGHT / 2) - (BBOX / 2),
-			 BBOX, BBOX, (start) * 64, (90) * 64);
+		 BBOX, BBOX, (start) * 64, (90) * 64, DRAW_XOR, RED);
 }
 
 SpecialStatus

@@ -541,7 +541,7 @@ do_special(Vehicle *v, SpecialType special_num, int action)
 			  (*s->proc) (v, s->record, SP_deactivate);
                           for (i=0; i<num_terminals; i++)
                               if (terminal[i]->vehicle == v) {
-                                  vid = (Video *) terminal[i]->video;
+                                  set_video((Video *) terminal[i]->video);
 			          (*s->proc) (v, s->record, SP_erase);
                               }
 		      }
@@ -551,7 +551,7 @@ do_special(Vehicle *v, SpecialType special_num, int action)
 	    	      if (s->status == SP_on)
                               for (i=0; i<num_terminals; i++)
                                   if (terminal[i]->vehicle == v) {
-                                      vid = (Video *) terminal[i]->video;
+                                      set_video((Video *) terminal[i]->video);
 			              (*s->proc) (v, s->record, SP_draw);
                                   }
 		  }

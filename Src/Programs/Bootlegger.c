@@ -1197,11 +1197,11 @@ static void erase_graphics(a) Z;
 
 		/* only erase it if the window hasn't been refreshed since we drew it
            (which would have erased it for us already) */
-		if (gp->frame > G vid->last_expose_frame) {
+		if (gp->frame > video_last_expose_frame(G vid)) {
 			/* erase it */
-			XDrawLine(G vid->dpy, G vid->win[ANIM_WIN].id,
-					  G vid->graph_gc[DRAW_XOR][gp->color],
-					  gp->x1, gp->y1, gp->x2, gp->y2);
+			video_draw_line(G vid, ANIM_WIN,
+					  gp->x1, gp->y1, gp->x2, gp->y2,
+					  DRAW_XOR, gp->color);
 		}
 		free((char *) gp);
 	}
@@ -1236,9 +1236,7 @@ int color;
 	else if (y1 > y2 + 1)
 		--y1, ++y2;
 
-	XDrawLine(G vid->dpy, G vid->win[ANIM_WIN].id,
-			  G vid->graph_gc[DRAW_XOR][color],
-			  x1, y1, x2, y2);
+	video_draw_line(G vid, ANIM_WIN, x1, y1, x2, y2, DRAW_XOR, color);
 
 	/* link into list, for later erasure */
 	gp->x1 = x1;

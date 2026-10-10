@@ -950,7 +950,7 @@ save_settings(char *pcFileName)
 		for (ctrj = 0; ctrj < num_terminals; ctrj++) {
 			if (terminal[ctrj]->vehicle == vptr) {
 				vidptr = (Video *) terminal[ctrj]->video;
-				dispname = vidptr->display_name;
+				dispname = video_display_name(vidptr);
 			}
 		}
 
