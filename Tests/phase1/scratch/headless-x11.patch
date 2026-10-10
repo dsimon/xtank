@@ -1,0 +1,39 @@
+--- a/Src/Display/x11.c
++++ b/Src/Display/x11.c
+@@ -404,7 +404,13 @@
+ 	vid->win[w].id = id;
+ 	vid->win[w].width = width;
+ 	vid->win[w].height = height;
++#ifdef HEADLESS
++	/* No Expose events arrive without a server; mark windows exposed so
++	   map_windows() does not block. */
++	vid->win[w].flags = WIN_exposed;
++#else
+ 	vid->win[w].flags = 0;
++#endif
+ 
+ 	/* Make sure the number of windows is high enough */
+ 	vid->num_windows = MAX(vid->num_windows, w + 1);
+@@ -718,6 +724,14 @@
+ 
+ 	max_events = *num_events;
+ 	*num_events = 0;
++#ifdef HEADLESS
++	/* No display and no event source: report no events, but keep the
++	   animation window flagged exposed so map_windows() terminates. */
++	(void) max_events;
++	if (vid && vid->num_windows > 0)
++		vid->win[0].flags |= WIN_exposed;	/* ANIM_WIN == 0 */
++	return;
++#else
+ 	while ((*num_events < max_events) && (!game_running || XPending(vid->dpy))) {
+ 		XNextEvent(vid->dpy, &xevent);
+ 		any_xevent = &xevent.xany;
+@@ -834,6 +848,7 @@
+ 			break;
+ 		}
+ 	}
++#endif /* HEADLESS */
+ }
+ 
+ /*
