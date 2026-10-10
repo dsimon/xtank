@@ -37,6 +37,7 @@
 #include "terminal.h"
 #include "vehicle.h"
 #include "proto.h"
+#include "intent.h"
 
 extern Terminal *term;
 extern Settings settings;
@@ -524,6 +525,76 @@ anim_input(Event *event)
 		}
 	}
 	return GAME_RUNNING;
+}
+
+/*
+** Legacy event adapter (P1.7).  Translate an animation-window control event
+** into a tick/player/sequence-tagged intent and submit it to the bounded
+** queue, instead of mutating the vehicle inline.  This is the seam a server
+** input source uses; the X front-end still calls anim_input() directly, so
+** this function does not alter existing gameplay.  Returns the intent_push()
+** status (0 accepted, negative rejected).
+*/
+int
+input_event_intent(Event *event, int player, int tick, unsigned int sequence)
+{
+	Intent in;
+	int dx, dy;
+
+	(void) memset((char *) &in, 0, sizeof(in));
+	in.tick = tick;
+	in.player = player;
+	in.sequence = sequence;
+	in.op = INTENT_NONE;
+
+	/* Compute dx and dy from center of animation window to cursor */
+	dx = event->x - ANIM_WIN_WIDTH / 2;
+	dy = event->y - ANIM_WIN_HEIGHT / 2;
+	if (term->status & TS_3d)
+		transform_3d(&dx, &dy);
+
+	switch (event->type) {
+	  case EVENT_LBUTTON:
+	  case EVENT_MBUTTON:
+		in.op = INTENT_AIM_WORLD;
+		in.a = (double) dx;
+		in.b = (double) dy;
+		break;
+	  case EVENT_RBUTTON:
+		in.op = INTENT_HEADING;
+		in.a = ATAN2(dy, dx);
+		break;
+	  case EVENT_KEY:
+		switch (lookup_key(event->key)) {
+		  case '0': case '1': case '2': case '3': case '4':
+		  case '5': case '6': case '7': case '8': case '9':
+			in.op = INTENT_DRIVE_REL;
+			in.a = (double) (event->key - '0');
+			break;
+		  case '-':
+			in.op = INTENT_DRIVE_REL;
+			in.a = -9.0;
+			break;
+		  case ' ':
+			in.op = INTENT_FIRE;
+			break;
+		  case 't':
+			in.op = INTENT_AIM_WORLD;
+			in.a = (double) dx;
+			in.b = (double) dy;
+			break;
+		  case 'g':
+			in.op = INTENT_HEADING;
+			in.a = ATAN2(dy, dx);
+			break;
+		  default:
+			return INTENT_REJECT_BADOP;
+		}
+		break;
+	  default:
+		return INTENT_REJECT_BADOP;
+	}
+	return intent_push(&in);
 }
 
 /*

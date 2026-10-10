@@ -36,6 +36,7 @@
 #include "globals.h"
 #include "assert.h"
 #include "proto.h"
+#include "lowlib.h"
 
 extern Terminal *term;
 extern Weapon_stat weapon_stat[];
@@ -44,6 +45,29 @@ extern Boolean game_paused;
 
 extern int frame;	/* HAK 2/93 */
 extern Map real_map;
+
+/*
+** Intent application primitives (P1.7).  These are the legacy control
+** operations the bounded intent queue dispatches to; they add no gameplay
+** rule of their own.
+*/
+void
+action_aim_world(Vehicle *v, double wx, double wy)
+{
+	if (v == (Vehicle *) NULL)
+		return;
+	set_current_vehicle(v);
+	aim_all_turrets((int) (wx - v->loc->x), (int) (wy - v->loc->y));
+}
+
+void
+action_fire_all(Vehicle *v)
+{
+	if (v == (Vehicle *) NULL)
+		return;
+	set_current_vehicle(v);
+	fire_all_weapons();
+}
 
 /* Adjust velocity, keeping direction the same */
 void adjust_speed(FLOAT *speedx, FLOAT *speedy, double adjust)

@@ -75,6 +75,23 @@ lowlib_forget_vehicle(void)
 }
 
 /*
+** Returns the vehicle a controller/tank index owns, or NULL if the index is
+** not a live controller in this world.  The server intent queue uses this to
+** bind one controller to one tank without reaching into the vehicle table
+** directly (P1.7).
+*/
+Vehicle *
+lowlib_actual_vehicle(int player)
+{
+	extern Vehicle actual_vehicles[];
+	extern int num_veh;
+
+	if (player < 0 || player >= num_veh)
+		return (Vehicle *) NULL;
+	return &actual_vehicles[player];
+}
+
+/*
 ** The check_time function is used to determine when to switch control
 ** back to the program scheduler.
 **
