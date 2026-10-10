@@ -862,7 +862,7 @@ main_interface(void)
 	for (itemp = 0; itemp < num_terminals; itemp++)
 		fix_combantants(itemp);
 
-#ifdef X11
+#ifdef GRAPHICS_POINTER_INPUT_ALWAYS_ON
 	button_up(ANIM_WIN, TRUE);
 	follow_mouse(ANIM_WIN, TRUE);
 #endif
@@ -1763,13 +1763,13 @@ get_player_info(void)
 		display_mesg2(ANIM_WIN, "                               ",
 					  0, line, INT_FONT);
 
-		if (vid->kludge.player_name[0] == '\0') {
+		if (video_player_name()[0] == '\0') {
 			if (!command_options.AutoStart) {
 				input_string(ANIM_WIN, "Enter player name:", term->player_name, 0,
 							 line, INT_FONT, MAXPNAME /*MAX_STRING - 1*/ );
 			}
 		} else {
-			strncpy(term->player_name, vid->kludge.player_name, MAXPNAME);
+			strncpy(term->player_name, video_player_name(), MAXPNAME);
 			term->player_name[MAXPNAME] = '\0';
 
 			sprintf(buf, "Player Name: %s", term->player_name);
@@ -1789,7 +1789,7 @@ get_player_info(void)
 				display_mesg2(ANIM_WIN, "Name used.  Please try another.",
 							  0, line + 1, INT_FONT);
 				duplicate = TRUE;
-				vid->kludge.player_name[0] = '\0';
+				video_player_name()[0] = '\0';
 				break;
 			}
 		}
@@ -1816,10 +1816,10 @@ get_player_info(void)
 	if (vdesc && term->vdesc) {	/* GHS 9/12/90 - kludge *//* GHS 9/12/90 - kludge */
 		menu_resize(&menu_sys, VEHICLES_MENU, num_vdescs);	/* GHS 9/12/90 - kludge */
 	}							/* GHS 9/12/90 - kludge */
-	term->mouse_speed = vid->kludge.mouse_speed;
-	term->mouse_drive = vid->kludge.mouse_drive;
-	term->mouse_heat = vid->kludge.mouse_heat;
-	term->keymap = vid->kludge.keymap;
+	term->mouse_speed = video_mouse_speed();
+	term->mouse_drive = video_mouse_drive();
+	term->mouse_heat = video_mouse_heat();
+	term->keymap = video_keymap();
 }
 
 void
@@ -2100,7 +2100,7 @@ ask_desc(int type, int row, int col)
 	}
 
 	do {
-		if (!*vid->kludge.tank_name) {
+		if (!*video_tank_name()) {
 /* Changed the clear_ask macro to use a position argument HAK 2/93 */
 			clear_ask(row, col);
 
@@ -2114,8 +2114,8 @@ ask_desc(int type, int row, int col)
 				break;
 			}
 		} else {
-			strcpy(resp, vid->kludge.tank_name);
-			*vid->kludge.tank_name = '\0';
+			strcpy(resp, video_tank_name());
+			*video_tank_name() = '\0';
 
 			sprintf(prompt, "Vehicle name: %s", resp);
 			display_mesg2(ANIM_WIN, prompt, row, col, INT_FONT);
