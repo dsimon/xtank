@@ -11,11 +11,17 @@
 # pulls in <X11/...>).  Backend-private presentation files are the only place
 # Xlib may appear.
 #
-# Later tasks add:
-#   --build     no X header in any server translation unit's deps        (P1.5)
+# P1.5 adds:
+#   --build     no X header in any server translation unit's deps.
+#               The explicit server source list comes from the build
+#               (Src/GNUmakefile: print-server-srcs); each server TU is asked
+#               for its compiler dependency list (-M) with the exact server
+#               flags (no -DX11, -DNULL_BACKEND) and the deps must contain no
+#               <X11/...> header and no backend-private Include/x11.h.
 #
 # Usage: bash Tests/phase1/check-x-boundary.sh --headers
 #        bash Tests/phase1/check-x-boundary.sh --sources
+#        bash Tests/phase1/check-x-boundary.sh --build
 # Exit:  0 clean, 1 boundary violation, 2 usage/unsupported mode.
 
 set -u
@@ -26,13 +32,16 @@ INC="$SRC/Include"
 CC="${CC:-gcc}"
 
 # Same feature defines as the supported build (Src/Makefile.inc1).
-DEFS=(
-	-DX11 -DUNIX -DS1024x864 -DKEYPAD_DETECT -DSTINGY_REDRAW
+COMMON_DEFS=(
+	-DUNIX -DS1024x864 -DKEYPAD_DETECT -DSTINGY_REDRAW
 	-DBATCH_LINES -DBATCH_POINTS -DBATCH_COLOR_LINES
 	-DCODE_SIZE=0x20000 -DSTACK_SIZE=0x8000
 	-DNEW_LIMITS -DSLOWER
 	-DDYNALOAD -DMULTI_SYNC -DTHREAD_SWAPCONTEXT
 )
+DEFS=( -DX11 "${COMMON_DEFS[@]}" )
+# Server build selects the null backend and no window-system define (P1.5).
+NULL_DEFS=( "${COMMON_DEFS[@]}" -DNULL_BACKEND )
 
 # Representative physics/bot headers, plus the neutral boundary headers that
 # the simulation and bot translation units include transitively.
@@ -70,11 +79,9 @@ case "$mode" in
 	--sources)
 		;;
 	--build)
-		echo "check-x-boundary.sh: mode '$mode' is not implemented yet (P1.5)" >&2
-		exit 2
 		;;
 	*)
-		echo "check-x-boundary.sh: unknown mode '$mode' (try --headers or --sources)" >&2
+		echo "check-x-boundary.sh: unknown mode '$mode' (try --headers, --sources or --build)" >&2
 		exit 2
 		;;
 esac
@@ -198,9 +205,86 @@ check_sources() {
 	echo "check-x-boundary: PASS ($scanned non-backend sources X-free)"
 }
 
+# ---------------------------------------------------------------------------
+# --build: no X header in any server translation unit's compiler deps.
+# ---------------------------------------------------------------------------
+# Fallback server source list (basenames) used if the build system cannot be
+# queried; kept in sync with Src/Makefile.inc1:SERVER_SRCS.
+FALLBACK_SERVER_SRCS="actions.c animate.c box.c camo.c collision.c cosell.c \
+disc.c display.c escher.c explosion.c file.c game.c gr.c highlib.c hit.c \
+hud.c icounter.c init.c input.c interface.c intersect.c lowlib.c main.c \
+mapper.c maze.c mdesign.c menu.c message.c newconsole.c newfile.c newradar.c \
+players.c program.c radar.c repair.c scroll.c setup.c setups.c status.c \
+sysdep.c unix.c update.c util.c vdesign.c vehicle.c version.c lex.zz.c \
+graphics.c objects.c three-d.c threadglue.c thread.c Bootlegger.c Dio.c \
+Diophantine.c Flipper.c drone.c eliza.c gnat.c mmtf.c rdfbot.c spot.c tagman.c"
+
+resolve_src() {   # basename -> path under Src, returning nonzero if absent
+	local f="$1"
+	local d
+	for d in "$SRC" "$SRC/Display" "$SRC/Programs" "$SRC/Threads"; do
+		if [ -f "$d/$f" ]; then
+			printf '%s\n' "$d/$f"
+			return 0
+		fi
+	done
+	return 1
+}
+
+check_build() {
+	local list depsdir
+	list=""
+	if command -v make >/dev/null 2>&1; then
+		list="$(make -C "$SRC" -s print-server-srcs 2>/dev/null || true)"
+	fi
+	if [ -z "$list" ]; then
+		echo "check-x-boundary: note: using fallback server source list" >&2
+		list="$FALLBACK_SERVER_SRCS"
+	fi
+
+	local f path dep hits
+
+	# Write dependency files to a private scratch dir: never clobber the
+	# build's own nobj/*.d (which drive make's incremental rebuilds).
+	depsdir="$(mktemp -d "${TMPDIR:-/tmp}/xtank-xbound.XXXXXX")"
+	trap "rm -rf '$depsdir'" EXIT
+	for f in $list; do
+		if ! path="$(resolve_src "$f")"; then
+			fail=1
+			echo "check-x-boundary: FAIL missing server source $f" >&2
+			continue
+		fi
+		scanned=$((scanned + 1))
+		dep="$depsdir/${f%.c}.d"
+
+		# Generate the compiler dependency file (system headers included, so
+		# <X11/...> is visible), with the exact server flags.
+		if ! "$CC" "${NULL_DEFS[@]}" -I"$SRC" -I"$INC" \
+				-M -MF "$dep" -MT "${f%.c}.o" "$path" 2>/dev/null; then
+			fail=1
+			echo "check-x-boundary: FAIL $f (dependency generation error)" >&2
+			continue
+		fi
+
+		hits="$(grep -nE '(^|[ /])X11/|/x11\.h([ :]|$)' "$dep" | head -3 || true)"
+		if [ -n "$hits" ]; then
+			fail=1
+			echo "check-x-boundary: FAIL $f (X header in server TU deps)" >&2
+			printf '%s\n' "$hits" | sed 's/^/    /' >&2
+		fi
+	done
+
+	if [ "$fail" -ne 0 ]; then
+		echo "check-x-boundary: FAILED (server TUs depend on X headers)" >&2
+		exit 1
+	fi
+	echo "check-x-boundary: PASS ($scanned server translation units X-free)"
+}
+
 case "$mode" in
   --headers) check_headers ;;
   --sources) check_sources ;;
+  --build)   check_build ;;
 esac
 
 exit 0

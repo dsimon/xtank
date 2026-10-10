@@ -30,7 +30,7 @@
 
 SUBDIR= Src
 
-all clean install:
+all clean install phase1-headless:
 	cd ${SUBDIR} && ${MAKE} $@
 
-.PHONY: all clean install ${SUBDIR}
+.PHONY: all clean install phase1-headless ${SUBDIR}

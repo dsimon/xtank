@@ -31,6 +31,9 @@
 # Makefile, as well as the GNUmakefile, to reduce the amount
 # of redundent copies of information between those systems.
 
+setups.c: setups.l
+	${LEX} -t setups.l > setups.c
+
 lex.zz.c: vload.l
 	${LEX} -Pzz ${.CURDIR}/vload.l
 

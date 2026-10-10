@@ -1,0 +1,22 @@
+# Tests/phase1/Makefile.server -- P1.5 authority for the display-free server
+# source list.
+#
+# The real build (two isolated object trees, X front-end and null/server) lives
+# in Src/GNUmakefile.  This file is a thin, dependency-free wrapper so the
+# boundary checker and the regression harness have a stable place to ask for
+# the explicit server translation-unit list without duplicating it.
+#
+# Usage:
+#   make -f Tests/phase1/Makefile.server print-server-srcs
+#
+# The list is the whole tree minus the X-only translation units (currently
+# Display/XMultiSync.c).  Display/graphics.c is in the server list and is
+# compiled with -DNULL_BACKEND, so it aggregates Display/null.c; Display/x11.c
+# is reachable only under -DX11 and never enters the server build.
+
+SRC ?= $(abspath $(CURDIR)/../../Src)
+
+print-server-srcs:
+	@$(MAKE) -C $(SRC) -s print-server-srcs
+
+.PHONY: print-server-srcs

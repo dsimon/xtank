@@ -35,7 +35,7 @@ SELFTEST=0
 
 usage() {
 	cat >&2 <<'EOF'
-usage: regression.sh [--stage before|after] [--subject x|headless|auto]
+usage: regression.sh [--stage before|after] [--subject x|headless|null|auto]
                      [--suite bootstrap|full] [--scenario NAME ...]
                      [--evidence DIR] [--keep-xvfb]
 EOF
@@ -62,7 +62,7 @@ case "$SUITE"  in bootstrap|full) ;; *) echo "bad --suite $SUITE" >&2; exit 2 ;;
 # headless thereafter, server after P1.15.  No such backend exists yet in
 # P1.1, so 'auto' resolves to X.
 if [ "$SUBJECT" = "auto" ]; then SUBJECT="x"; fi
-case "$SUBJECT" in x|headless) ;; *) echo "bad --subject $SUBJECT" >&2; exit 2 ;; esac
+case "$SUBJECT" in x|headless|null) ;; *) echo "bad --subject $SUBJECT" >&2; exit 2 ;; esac
 
 mkdir -p "$EVIDENCE" "$EVIDENCE/runs"
 
@@ -94,8 +94,54 @@ select_scenarios() {
 		return
 	fi
 	# P1.1 bootstrap and P1.2 full both cover the legacy v1 scenarios; 'full'
-	# will extend to v2 formats in P1.2.
+	# additionally runs the v2 per-tick bot-free characterization.
 	echo $ALL_SCENARIOS
+}
+
+# ---------------------------------------------------------------------------
+# v2 per-tick, bot-free characterization scenarios (P1.2)
+# ---------------------------------------------------------------------------
+V2_SCENARIOS="trace-quadrant trace-arena trace-arena-win"
+V2_PERIOD=1
+V2_TICKLIMIT=400
+
+v2_settings() { echo "$SCEN_DIR/$1.settings"; }
+v2_trace()    { echo "$SCEN_DIR/$1.trace"; }
+v2_winning() {
+	case "$1" in
+	  trace-arena-win) echo 1000 ;;
+	  *) echo 2000 ;;
+	esac
+}
+v2_expect() {
+	case "$1" in
+	  trace-quadrant)  echo "wall,tank,bullet,directional,death,respawn,score,win,reset" ;;
+	  trace-arena)     echo "wall,tank,bullet,directional,death,respawn" ;;
+	  trace-arena-win) echo "wall,tank,bullet,directional,death,score,win,reset" ;;
+	esac
+}
+
+select_v2_scenarios() {
+	if [ -n "$SCENARIO_FILTER" ]; then
+		echo $SCENARIO_FILTER
+		return
+	fi
+	echo $V2_SCENARIOS
+}
+
+validate_dump_v2() {   # $1 = file
+	local f="$1"
+	[ -f "$f" ] || fail "missing v2 dump: $f"
+	[ -s "$f" ] || fail "empty v2 dump: $f"
+	local lastc
+	lastc=$(tail -c 1 "$f" | od -An -tu1 | tr -d ' ')
+	[ "$lastc" = "10" ] || fail "truncated v2 dump (no final newline): $f"
+	head -1 "$f" | grep -q '^F2 ' || fail "v2 dump does not start with F2: $f"
+	grep -q '^V ' "$f" || fail "v2 dump has no vehicle records: $f"
+	# v2 must never carry screen coordinates or pointer/padding bytes.
+	if grep -qi 'screen' "$f"; then
+		fail "v2 dump contains a screen-coordinate field: $f"
+	fi
 }
 
 # ---------------------------------------------------------------------------
@@ -105,6 +151,11 @@ XDPY=""
 XVFB_PID=""
 XVFB_OWNED=0
 XVFB_LOG=""
+
+XDPY2=""
+XVFB2_PID=""
+XVFB2_OWNED=0
+XVFB2_LOG=""
 
 xvfb_alive() { DISPLAY=":$1" xdpyinfo >/dev/null 2>&1; }
 
@@ -118,8 +169,13 @@ display_free() {
 
 cleanup() {
 	local rc=$?
-	if [ "$XVFB_OWNED" = "1" ] && [ "$KEEP_XVFB" = "0" ] && [ -n "$XVFB_PID" ]; then
-		kill "$XVFB_PID" 2>/dev/null || true
+	if [ "$KEEP_XVFB" = "0" ]; then
+		if [ "$XVFB_OWNED" = "1" ] && [ -n "$XVFB_PID" ]; then
+			kill "$XVFB_PID" 2>/dev/null || true
+		fi
+		if [ "$XVFB2_OWNED" = "1" ] && [ -n "$XVFB2_PID" ]; then
+			kill "$XVFB2_PID" 2>/dev/null || true
+		fi
 	fi
 	exit $rc
 }
@@ -156,11 +212,48 @@ ensure_xvfb() {
 		fi
 		if xvfb_alive "$XDPY"; then
 			log "== started Xvfb :$XDPY (pid $XVFB_PID)"
-			return
+			break
 		fi
 		sleep 0.2
 	done
-	fail "Xvfb :$XDPY did not become ready (see $XVFB_LOG)"
+	xvfb_alive "$XDPY" || fail "Xvfb :$XDPY did not become ready (see $XVFB_LOG)"
+
+	# The v2 bot-free suite drives two human player slots on two displays
+	# (the legacy engine only accepts a player whose terminal name matches),
+	# so start a second harness-owned server and set each display's
+	# xtank.playerName resource to the fixture names used by the traces.
+	if [ "$SUITE" = "full" ]; then
+		local d
+		for d in 89 88 87 86 85 84 83 82 81 80; do
+			if display_free "$d"; then
+				XDPY2="$d"
+				break
+			fi
+		done
+		[ -n "$XDPY2" ] || fail "no free second X display in :80-:89"
+
+		XVFB2_LOG="$EVIDENCE/xvfb-$XDPY2.log"
+		setsid Xvfb ":$XDPY2" -screen 0 1024x864x24 -nolisten tcp -noreset \
+		    </dev/null >"$XVFB2_LOG" 2>&1 &
+		XVFB2_PID=$!
+		XVFB2_OWNED=1
+		echo "$XVFB2_PID" > "$EVIDENCE/xvfb2.pid"
+		for i in $(seq 1 50); do
+			if ! kill -0 "$XVFB2_PID" 2>/dev/null; then
+				fail "Xvfb :$XDPY2 exited during startup (see $XVFB2_LOG)"
+			fi
+			if xvfb_alive "$XDPY2"; then
+				break
+			fi
+			sleep 0.2
+		done
+		xvfb_alive "$XDPY2" || \
+		    fail "Xvfb :$XDPY2 did not become ready (see $XVFB2_LOG)"
+		log "== started Xvfb :$XDPY2 (pid $XVFB2_PID)"
+
+		printf 'xtank.playerName: playerA\n' | xrdb -display ":$XDPY" -merge
+		printf 'xtank.playerName: playerB\n' | xrdb -display ":$XDPY2" -merge
+	fi
 }
 
 # ---------------------------------------------------------------------------
@@ -215,7 +308,7 @@ run_candidate() {   # $1 scen  $2 out
 	local period tick
 	period=$(scen_period "$scen"); tick=$(scen_ticklim "$scen")
 
-	if [ "$SUBJECT" = "headless" ]; then
+	if [ "$SUBJECT" = "headless" ] || [ "$SUBJECT" = "null" ]; then
 		( cd "$src/Src" && \
 		  env -u DISPLAY LC_ALL=C XTANK_DIR="$src" XTANK_SEED=114336 \
 		      XTANK_DUMP="$out" XTANK_DUMP_PERIOD="$period" \
@@ -229,6 +322,57 @@ run_candidate() {   # $1 scen  $2 out
 		      XTANK_TICK_LIMIT="$tick" LD_PRELOAD="$EVIDENCE/fixseed.so" \
 		      timeout 900 ./xtank-xcand -S -D -P -X -F \
 		      "$SCEN_DIR/$scen.settings" ":$XDPY" ) >"$out.stdout" 2>&1
+	fi
+}
+
+run_reference_v2() {   # $1 scen  $2 out
+	local scen="$1" out="$2"
+	local settings trace
+	settings=$(v2_settings "$scen"); trace=$(v2_trace "$scen")
+	( cd "$REF_ROOT/Src" && \
+	  env LC_ALL=C DISPLAY=":$XDPY" XTANK_DIR="$REF_ROOT" XTANK_SEED=114336 \
+	      XTANK_DUMP="$out" XTANK_DUMP_PERIOD="$V2_PERIOD" XTANK_DUMP_FORMAT=2 \
+	      XTANK_TICK_LIMIT="$V2_TICKLIMIT" XTANK_TRACE="$trace" \
+	      LD_PRELOAD="$EVIDENCE/fixseed.so" \
+	      timeout 900 "$REF_BIN" -S -D -P -X -F "$settings" \
+	      ":$XDPY" ":$XDPY2" ) >"$out.stdout" 2>&1
+}
+
+run_candidate_v2() {   # $1 scen  $2 out
+	local scen="$1" out="$2"
+	local cand="$EVIDENCE/candidate-$STAGE-$SUBJECT"
+	local src="$cand/src"
+	local settings trace
+	settings=$(v2_settings "$scen"); trace=$(v2_trace "$scen")
+
+	if [ "$SUBJECT" = "null" ]; then
+		# The display-free backend has no X resource database; supply the
+		# fixture player names per terminal and give main() two terminal
+		# arguments so both human slots exist (the v2 traces bind by name).
+		( cd "$src/Src" && \
+		  env -u DISPLAY LC_ALL=C XTANK_NULL_PLAYERS=playerA:playerB \
+		      XTANK_DIR="$src" XTANK_SEED=114336 \
+		      XTANK_DUMP="$out" XTANK_DUMP_PERIOD="$V2_PERIOD" \
+		      XTANK_DUMP_FORMAT=2 XTANK_TICK_LIMIT="$V2_TICKLIMIT" \
+		      XTANK_TRACE="$trace" LD_PRELOAD="$EVIDENCE/fixseed.so" \
+		      timeout 900 ./xtank-headless -S -D -P -X -F \
+		      "$settings" nullterm0 nullterm1 ) >"$out.stdout" 2>&1
+	elif [ "$SUBJECT" = "headless" ]; then
+		( cd "$src/Src" && \
+		  env -u DISPLAY LC_ALL=C XTANK_DIR="$src" XTANK_SEED=114336 \
+		      XTANK_DUMP="$out" XTANK_DUMP_PERIOD="$V2_PERIOD" \
+		      XTANK_DUMP_FORMAT=2 XTANK_TICK_LIMIT="$V2_TICKLIMIT" \
+		      XTANK_TRACE="$trace" LD_PRELOAD="$EVIDENCE/fixseed.so" \
+		      timeout 900 ./xtank-headless -S -D -P -X -F \
+		      "$settings" ) >"$out.stdout" 2>&1
+	else
+		( cd "$src/Src" && \
+		  env LC_ALL=C DISPLAY=":$XDPY" XTANK_DIR="$src" XTANK_SEED=114336 \
+		      XTANK_DUMP="$out" XTANK_DUMP_PERIOD="$V2_PERIOD" \
+		      XTANK_DUMP_FORMAT=2 XTANK_TICK_LIMIT="$V2_TICKLIMIT" \
+		      XTANK_TRACE="$trace" LD_PRELOAD="$EVIDENCE/fixseed.so" \
+		      timeout 900 ./xtank-xcand -S -D -P -X -F \
+		      "$settings" ":$XDPY" ":$XDPY2" ) >"$out.stdout" 2>&1
 	fi
 }
 
@@ -388,8 +532,91 @@ for scen in $(select_scenarios); do
 	} > "$run_dir/$scen.$STAGE.$SUBJECT.result"
 done
 
-# 5. Record the frozen reference manifest fingerprint with this run.
+# ---------------------------------------------------------------------------
+# 5. v2 per-tick, bot-free characterization (suite full)
+# ---------------------------------------------------------------------------
+if [ "$SUITE" = "full" ]; then
+	log "== v2 per-tick characterization (period $V2_PERIOD, tick-limit $V2_TICKLIMIT)"
+	gcc -O2 -Wall -o "$EVIDENCE/state_dump" "$HARNESS/state_dump.c" -lm \
+	    || fail "could not build state_dump analyzer"
+	GOLDEN="$HARNESS/v2-golden.sha256"
+
+	for scen in $(select_v2_scenarios); do
+		settings=$(v2_settings "$scen"); trace=$(v2_trace "$scen")
+		[ -f "$settings" ] || fail "$scen: missing settings $settings"
+		[ -f "$trace" ]    || fail "$scen: missing trace $trace"
+		expect=$(v2_expect "$scen"); winning=$(v2_winning "$scen")
+		log "== v2 scenario $scen (winning score $winning)"
+		run_dir="$EVIDENCE/runs"
+
+		run_reference_v2 "$scen" "$run_dir/$scen.v2.x.state"
+		validate_dump_v2 "$run_dir/$scen.v2.x.state"
+
+		cmp_reps_ok=1
+		for r in 1 2 3; do
+			run_candidate_v2 "$scen" "$run_dir/$scen.v2.$STAGE.r$r.state"
+			validate_dump_v2 "$run_dir/$scen.v2.$STAGE.r$r.state"
+		done
+		cmp "$run_dir/$scen.v2.$STAGE.r1.state" \
+		    "$run_dir/$scen.v2.$STAGE.r2.state" >/dev/null || cmp_reps_ok=0
+		cmp "$run_dir/$scen.v2.$STAGE.r1.state" \
+		    "$run_dir/$scen.v2.$STAGE.r3.state" >/dev/null || cmp_reps_ok=0
+		[ "$cmp_reps_ok" = "1" ] || \
+		    fail "$scen: v2 candidate repeats are not identical"
+
+		if ! cmp "$run_dir/$scen.v2.x.state" \
+			 "$run_dir/$scen.v2.$STAGE.r1.state" >/dev/null; then
+			firstdiff=$(cmp "$run_dir/$scen.v2.x.state" \
+			    "$run_dir/$scen.v2.$STAGE.r1.state" 2>&1 | head -1)
+			fail "$scen: v2 candidate differs from X reference ($firstdiff)"
+		fi
+
+		# Validate the frozen trace and the X golden before trusting events.
+		if [ -f "$GOLDEN" ]; then
+			want=$(awk -v s="$scen" '$1==s {print $2}' "$GOLDEN")
+			got=$(sha256sum "$run_dir/$scen.v2.x.state" | awk '{print $1}')
+			[ -n "$want" ] || fail "$scen: no frozen golden entry"
+			[ "$want" = "$got" ] || \
+			    fail "$scen: X v2 golden sha256 mismatch ($got != $want)"
+		fi
+
+		# Event assertions: identical on X and candidate, and complete.
+		"$EVIDENCE/state_dump" --file "$run_dir/$scen.v2.x.state" \
+		    --winning-score "$winning" --expect "$expect" \
+		    > "$run_dir/$scen.v2.x.assert" 2>&1 || \
+		    fail "$scen: X assertions failed (see $scen.v2.x.assert)"
+		"$EVIDENCE/state_dump" --file "$run_dir/$scen.v2.$STAGE.r1.state" \
+		    --winning-score "$winning" --expect "$expect" \
+		    > "$run_dir/$scen.v2.$STAGE.assert" 2>&1 || \
+		    fail "$scen: candidate assertions failed"
+		cmp "$run_dir/$scen.v2.x.assert" \
+		    "$run_dir/$scen.v2.$STAGE.assert" >/dev/null || \
+		    fail "$scen: X and candidate event assertions differ"
+
+		sed -n '1,9p' "$run_dir/$scen.v2.x.assert" | \
+		    while IFS= read -r l; do log "    $l"; done
+
+		cp -f "$run_dir/$scen.v2.$STAGE.r1.state" \
+		    "$run_dir/$scen.v2.$STAGE.state"
+		{
+			echo "scenario=$scen"
+			echo "format=v2"
+			echo "stage=$STAGE"
+			echo "subject=$SUBJECT"
+			echo "period=$V2_PERIOD"
+			echo "tick_limit=$V2_TICKLIMIT"
+			echo "winning_score=$winning"
+			echo "trace_sha256=$(sha256sum "$trace" | awk '{print $1}')"
+			echo "settings_sha256=$(sha256sum "$settings" | awk '{print $1}')"
+			echo "x_sha256=$(sha256sum "$run_dir/$scen.v2.x.state" | awk '{print $1}')"
+			echo "candidate_sha256=$(sha256sum "$run_dir/$scen.v2.$STAGE.state" | awk '{print $1}')"
+			echo "cmp=identical"
+		} > "$run_dir/$scen.v2.$STAGE.$SUBJECT.result"
+	done
+fi
+
+# 6. Record the frozen reference manifest fingerprint with this run.
 sha256sum "$EVIDENCE/reference/MANIFEST" > "$EVIDENCE/reference/MANIFEST.sha256"
 
 log ""
-log "P1.1 REGRESSION PASS (stage=$STAGE subject=$SUBJECT suite=$SUITE)"
+log "P1.2 REGRESSION PASS (stage=$STAGE subject=$SUBJECT suite=$SUITE)"

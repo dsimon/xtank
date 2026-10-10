@@ -33,17 +33,17 @@ PREFIX=/usr/local
 
 # When this was built using Imake, the Display, Programs and Threads
 # directories were built into different libraries.  Here, we're just
-# going to build them all into this directory and forgo linking the
-# code into libraries.
+# going to build them all into this directory (and, for P1.5, two isolated
+# object trees) and forgo linking the code into libraries.
 
 VPATH=	${.CURDIR}/Display:${.CURDIR}/Programs:${.CURDIR}/Threads
 
 ifneq ("$(wildcard /opt/X11/include)","")
-CFLAGS0+= -I/opt/X11/include -D_XOPEN_SOURCE
+X11INC= -I/opt/X11/include -D_XOPEN_SOURCE
 LDFLAGS+= -L/opt/X11/lib
 endif
 ifneq ("$(wildcard /usr/local/include/X11)","")
-CFLAGS0+= -I/usr/local/include
+X11INC+= -I/usr/local/include
 LDFLAGS+= -L/usr/local/lib
 endif
 
@@ -53,22 +53,63 @@ ifeq ($(shell uname),Linux)
 LDLIBS+= -ldl
 endif
 
-LDLIBS+= -lX11 -lm
+# ---------------------------------------------------------------------------
+# Flags for the two builds: the X front-end and the display-free server.
+# ---------------------------------------------------------------------------
+XCFLAGS= -I${.CURDIR} -I${.CURDIR}/Include -I/usr/local/include -O0 -g \
+	${X11INC} ${COMMON_DEFS} ${X_DEFS} -DXTANK_DIR="\"${.CURDIR}/..\""
+NCFLAGS= -I${.CURDIR} -I${.CURDIR}/Include -I/usr/local/include -O0 -g \
+	${COMMON_DEFS} ${NULL_DEFS} -DXTANK_DIR="\"${.CURDIR}/..\""
+XCFLAGS+= -DALLDEFINES="\"X11 frontend (P1.5)\""
+NCFLAGS+= -DALLDEFINES="\"null backend server (P1.5)\""
+NCFLAGS+= -MMD -MP
 
-OBJS:=	$(patsubst %.c,%.o,$(SRCS))
+XOBJ=	xobj
+NOBJ=	nobj
 
-all:	${PROG}
+XOBJS=	$(addprefix ${XOBJ}/,$(SRCS:.c=.o))
+NOBJS=	$(addprefix ${NOBJ}/,$(SERVER_SRCS:.c=.o))
 
-install: ${PROG}
+XTANK=	xtank
+XTANK_HEADLESS=	xtank-headless
+
+all:	${XTANK} ${XTANK_HEADLESS}
+
+phase1-headless: ${XTANK_HEADLESS}
+
+install: ${XTANK}
 	mkdir -p ${DESTDIR}${PREFIX}/bin
-	install -s ${PROG} ${DESTDIR}${PREFIX}/bin
+	install -s ${XTANK} ${DESTDIR}${PREFIX}/bin
 
-${PROG}: ${OBJS}
-	${LINK.c} $^ ${LOADLIBES} ${LDLIBS} -o $@
+${XTANK}: ${XOBJS}
+	${CC} ${LDFLAGS} $^ -lX11 -lm ${LDLIBS} -o $@
+
+${XTANK_HEADLESS}: ${NOBJS}
+	${CC} ${LDFLAGS} $^ -lm ${LDLIBS} -o $@
+
+# The server object tree records compiler dependency files (.d) that
+# Tests/phase1/check-x-boundary.sh --build inspects.
+${NOBJ}/%.o: %.c
+	@mkdir -p ${NOBJ}
+	${CC} ${NCFLAGS} -c $< -o $@
+
+${XOBJ}/%.o: %.c
+	@mkdir -p ${XOBJ}
+	${CC} ${XCFLAGS} -c $< -o $@
+
+# Print the explicit server translation-unit list (used by the boundary
+# checker); does not build anything.
+print-server-srcs:
+	@echo $(SERVER_SRCS)
+
+# Server dependency files (from -MMD) so backend includes (e.g. Display/null.c)
+# are tracked; also what check-x-boundary.sh --build inspects.
+-include $(NOBJS:.o=.d)
 
 include ${.CURDIR}/Makefile.inc2
 
 clean:
-	rm -f ${PROG} ${OBJS} ${CLEANFILES} *.core
+	rm -f ${XTANK} ${XTANK_HEADLESS} ${CLEANFILES} *.core
+	rm -rf ${XOBJ} ${NOBJ}
 
-.PHONY: all clean install
+.PHONY: all clean install phase1-headless print-server-srcs

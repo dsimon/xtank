@@ -34,22 +34,37 @@
 PROG=	xtank
 MK_MAN=no
 
+# ---------------------------------------------------------------------------
+# Common feature defines (no window-system selection).
+# ---------------------------------------------------------------------------
+COMMON_DEFS= -DUNIX -DS1024x864 -DKEYPAD_DETECT -DSTINGY_REDRAW \
+	-DBATCH_LINES -DBATCH_POINTS -DBATCH_COLOR_LINES \
+	-DCODE_SIZE=0x20000 -DSTACK_SIZE=0x8000 \
+	-DNEW_LIMITS -DSLOWER \
+	-DDYNALOAD -DMULTI_SYNC -DTHREAD_SWAPCONTEXT
+
+# The X presentation front-end selects -DX11; the display-free server selects
+# -DNULL_BACKEND and no window-system define (P1.5).
+X_DEFS=	-DX11
+NULL_DEFS= -DNULL_BACKEND
+
 CFLAGS0+= -I${.CURDIR} -I${.CURDIR}/Include \
 	-I/usr/local/include -O0 -g
 
-CFLAGS0+= -DX11 -DUNIX -DS1024x864 -DKEYPAD_DETECT -DSTINGY_REDRAW \
-	-DBATCH_LINES -DBATCH_POINTS -DBATCH_COLOR_LINES \
-	-DCODE_SIZE=0x20000 -DSTACK_SIZE=0x8000 \
-	-DNEW_LIMITS -DSLOWER
-
-CFLAGS0+= -DDYNALOAD -DMULTI_SYNC -DTHREAD_SWAPCONTEXT
+CFLAGS0+= ${COMMON_DEFS}
 
 CFLAGS1+= -DXTANK_DIR="\"${.CURDIR}/..\""
 
 DEFINES=-DALLDEFINES="\"${CFLAGS0}\""
 
-CFLAGS+=${DEFINES} ${CFLAGS0} ${CFLAGS1}
+# Compatibility aggregate (BSD build): the X front-end.
+CFLAGS+=${DEFINES} ${CFLAGS0} ${X_DEFS} ${CFLAGS1}
 
+#
+# Explicit source lists.  SRCS is kept for the legacy BSD Makefile; the GNU
+# build splits the tree into a shared simulation/presentation set plus the
+# X-only files.
+#
 SRCS=	actions.c animate.c box.c camo.c collision.c cosell.c \
 	disc.c display.c escher.c explosion.c file.c game.c gr.c \
 	highlib.c hit.c hud.c icounter.c init.c input.c interface.c \
@@ -71,3 +86,17 @@ SRCS+=	Bootlegger.c \
 	rdfbot.c \
 	spot.c \
 	tagman.c
+
+#
+# X-only translation units (never part of the server source list).
+#
+X_SRCS=	XMultiSync.c
+
+#
+# Server (display-free) source list: the whole tree except the X-only TUs.
+# Display/graphics.c is compiled with -DNULL_BACKEND so it aggregates
+# Display/null.c instead of Display/x11.c; Display/null.c is #included, not a
+# translation unit of its own.  Display/x11.c and Display/x11.h are reachable
+# only under -DX11 and never enter the server build.
+#
+SERVER_SRCS= $(filter-out $(X_SRCS),$(SRCS))

@@ -11,4 +11,8 @@ vload.flexed
 xtank
 xtank.full
 xtank.debug
+xtank-headless
+xobj
+nobj
 *.o
+*.d

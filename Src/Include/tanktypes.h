@@ -57,6 +57,14 @@ typedef Byte Bits;
 typedef unsigned short Bits;
 #endif
 
+/*
+ * Neutral fallback (P1.5): the server build compiles without X10/X11/AMIGA.
+ * Match the X11 selection so body bitmaps and rotation keep the same width.
+ */
+#if !defined(X10) && !defined(X11) && !defined(AMIGA)
+typedef Byte Bits;
+#endif
+
 typedef struct {
 	short x, y;
 } Coord;
