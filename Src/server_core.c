@@ -45,6 +45,7 @@
 ** not attempted here.
 */
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -68,7 +69,7 @@ static ServerConfig the_config;
 
 /* The seed actually used for the server-owned RNG stream. */
 static unsigned int the_seed = 0;
-static int have_seed = 0;
+static int seed_captured = 0;
 
 /*
 ** Lifecycle oracle bookkeeping (P1.6 lifecycle.sh only).  Active only in the
@@ -129,14 +130,56 @@ server_player_name(int terminal_index)
 }
 
 /*
-** Seed the server-owned RNG stream.  The default (seed == 0) keeps the pin's
-** time()-based init_random() so the oracle reference stays comparable until
-** P1.8 supplies an explicit configured seed.
+** Explicit seed source (P1.8).  XTANK_SEED, when present, is the configured
+** server seed; it is parsed strictly so a malformed value cannot silently
+** fall back to the non-deterministic time()-based default.  Returns 0 when a
+** seed was configured, 1 when absent, -1 when malformed.
+*/
+int
+server_config_seed_env(ServerConfig *cfg)
+{
+	const char *s = getenv("XTANK_SEED");
+	char *end;
+	unsigned long v;
+
+	if (s == NULL)
+		return 1;
+	if (*s == '\0')
+		return -1;
+	errno = 0;
+	v = strtoul(s, &end, 10);
+	if (errno != 0 || end == s || *end != '\0' || v > 0xffffffffUL)
+		return -1;
+
+	cfg->seed = (unsigned int) v;
+	cfg->seed_set = 1;
+	return 0;
+}
+
+/*
+** Replay mode: the STATE_DUMP oracle is producing a comparable dump, so the
+** run must be deterministic.  Only then does a missing configured seed become
+** fatal; a normal front-end run keeps the pin's time()-based default.
+*/
+static int
+server_replay_mode(void)
+{
+#ifdef STATE_DUMP
+	return getenv("XTANK_DUMP") != NULL || getenv("XTANK_TRACE") != NULL;
+#else
+	return 0;
+#endif
+}
+
+/*
+** Seed the server-owned RNG stream.  This is the single seed source for the
+** server: the pin's RNG implementation (init_random_seed -> SEEDRANDOM) and
+** its call order are unchanged -- only the seed value differs.
 */
 void
 server_seed_random(unsigned int seed)
 {
-	srandom(seed);
+	init_random_seed(seed);
 }
 
 void
@@ -147,17 +190,26 @@ server_init(ServerConfig *cfg)
 	if (cfg != NULL && cfg != &the_config)
 		the_config = *cfg;
 
-	if (the_config.seed != 0) {
+	if (the_config.seed_set) {
 		the_seed = the_config.seed;
 		server_seed_random(the_seed);
+	} else if (server_replay_mode()) {
+		/*
+		 * Deterministic replay without a configured seed is a hard error:
+		 * failing predictably is better than silently dumping a different
+		 * time()-seeded stream.
+		 */
+		fprintf(stderr,
+				"xtank: replay mode requires an explicit seed "
+				"(set XTANK_SEED to a decimal integer)\n");
+		exit(2);
 	} else {
 		init_random();
 		/* Capture the legacy time()-based seed so the lifecycle oracle can
-		   replay each epoch from the same stream.  (Under the reference
-		   shim this is the configured XTANK_SEED.) */
+		   replay each epoch from the same stream. */
 		the_seed = (unsigned int) time((long *) NULL);
 	}
-	have_seed = 1;
+	seed_captured = 1;
 }
 
 int
@@ -184,6 +236,22 @@ server_tick_pace(void)
 }
 
 /*
+** Explicit match-reset seed policy (P1.8).
+**
+** The pinned single-match behaviour is to seed once at process start and let
+** the stream continue across resets; the normal server path does exactly
+** that, so no frozen value changes.  The lifecycle replay oracle instead
+** restarts every epoch from the captured configured seed so each epoch is
+** self-contained and byte-comparable to the frozen X reference.
+*/
+static void
+server_match_seed(void)
+{
+	if (server_lifecycle_active() && seed_captured)
+		server_seed_random(the_seed);
+}
+
+/*
 ** Lifecycle: one match over the retained single-world globals.
 */
 int
@@ -195,14 +263,7 @@ server_match_init(void)
 	if (num_combatants == 0)
 		return GAME_FAILED;
 
-	/*
-	 * Lifecycle oracle: replay every epoch from the same captured seed so
-	 * each epoch is comparable to the frozen X reference.  Normal runs never
-	 * take this path (server_lifecycle_active() is 0), so the shared RNG
-	 * stream is unchanged outside the oracle.
-	 */
-	if (server_lifecycle_active() && have_seed)
-		server_seed_random(the_seed);
+	server_match_seed();
 
 	/* A fresh match starts with no queued or held player input. */
 	intent_reset();

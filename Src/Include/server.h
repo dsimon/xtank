@@ -59,12 +59,14 @@ typedef struct {
 } ServerPlayers;
 
 /*
- * Server-owned match configuration.  seed == 0 selects the legacy
- * time()-based default; tick_hz == 0 selects the legacy game_speed pacing.
+ * Server-owned match configuration.  seed_set == 0 selects the legacy
+ * time()-based default; seed_set == 1 pins the RNG to seed before the first
+ * random call (P1.8).  tick_hz == 0 selects the legacy game_speed pacing.
  */
 typedef struct {
 	ServerPlayers players;
 	unsigned int seed;
+	int seed_set;
 	int tick_hz;
 } ServerConfig;
 
@@ -73,6 +75,14 @@ ServerConfig *server_config(void);
 void server_config_init(ServerConfig *cfg);
 int server_config_add_player(ServerConfig *cfg, const char *name);
 const char *server_player_name(int terminal_index);
+
+/*
+ * Explicit seed source (P1.8).  Reads XTANK_SEED into cfg before the RNG is
+ * seeded.  Returns 0 when a valid seed was configured, 1 when the variable is
+ * absent (legacy time()-based default), and -1 when it is malformed (empty,
+ * non-numeric, trailing junk or out of range).
+ */
+int server_config_seed_env(ServerConfig *cfg);
 
 /*
  * One-time server initialisation: installs the configuration and seeds the

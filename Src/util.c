@@ -62,6 +62,21 @@ init_random(void)
 }
 
 /*
+** Seeds the random number generator with an explicit value (P1.8).
+**
+** This is the explicit seed source for the server: the RNG implementation and
+** every call site (rnd/rnd_interval) are the pin's; only where the seed comes
+** from changes.  It uses the same SEEDRANDOM as init_random() so a configured
+** seed reproduces exactly what the reference gets from time() under the
+** fixseed shim.
+*/
+void
+init_random_seed(unsigned int seed)
+{
+	SEEDRANDOM((int) seed);
+}
+
+/*
 ** Returns a random integer from 0 to mx-1.
 */
 int

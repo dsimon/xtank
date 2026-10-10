@@ -239,6 +239,15 @@ main(int argc, char *argv[])
 		puts((command_options.UseSetting) ? "ON" : "OFF");
 #endif
 	}
+	/*
+	 * Explicit in-process seed (P1.8): read the configured seed from the
+	 * environment into the server config before server_init() seeds the RNG.
+	 * A malformed value is a hard error rather than a silent fall back to
+	 * the time()-based default.
+	 */
+	if (server_config_seed_env(server_config()) < 0)
+		rorre("Malformed XTANK_SEED; expected a decimal integer.");
+
 	/* Initialize various and sundry things */
 	debug("Initializing various things");
 	server_init(server_config());

@@ -52,6 +52,8 @@ void toggle_3d P_((int));
 
 /* actions.c */
 void adjust_loc P_((Loc *loc, int dx, int dy));
+void action_aim_world P_((Vehicle *v, double wx, double wy));
+void action_fire_all P_((Vehicle *v));
 Bullet *make_bullet P_((Vehicle *, Loc *, WeaponType, Angle, lCoord *));
 int det_tow P_((Vehicle *));
 int turn_tow P_((Vehicle *, float direction));
@@ -218,6 +220,7 @@ void init_eset P_((void));
 /* input.c */
 int get_input P_((void));
 int anim_input P_((Event *));
+int input_event_intent P_((Event *, int, int, unsigned int));
 int get_reply P_((void));
 void wait_input P_((void));
 int scan_input P_((void));
@@ -286,6 +289,7 @@ int point_in_vehicle P_((Vehicle *, double, double));
 
 /* lowlib.c */
 /* lowlib.c prototypes are in lowlib.h */
+Vehicle *lowlib_actual_vehicle P_((int player));
 
 /* main.c */
 void debugger_break P_((void));
@@ -519,6 +523,7 @@ void update_screen_locs P_((void));
 
 /* util.c */
 void init_random P_((void));
+void init_random_seed P_((unsigned int));
 int rnd P_((int));
 FLOAT rnd_interval P_((FLOAT, FLOAT));
 void display_mesg P_((int, char *, int, int));

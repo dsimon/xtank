@@ -301,25 +301,35 @@ run_reference() {   # $1 scen  $2 out
 	      ":$XDPY" ) >"$out.stdout" 2>&1
 }
 
+# Seed source (P1.8): the "after" candidate takes its seed from server config
+# (XTANK_SEED) with no preload; the pinned "before" baseline predates the
+# config seed and still needs the reference-only fixseed.so shim.  The frozen
+# X reference always keeps the shim.
 run_candidate() {   # $1 scen  $2 out
 	local scen="$1" out="$2"
 	local cand="$EVIDENCE/candidate-$STAGE-$SUBJECT"
 	local src="$cand/src"
 	local period tick
 	period=$(scen_period "$scen"); tick=$(scen_ticklim "$scen")
+	local -a seedenv=()
+	if [ "$STAGE" = "before" ]; then
+		seedenv=(LD_PRELOAD="$EVIDENCE/fixseed.so")
+	fi
 
 	if [ "$SUBJECT" = "headless" ] || [ "$SUBJECT" = "null" ]; then
 		( cd "$src/Src" && \
-		  env -u DISPLAY LC_ALL=C XTANK_DIR="$src" XTANK_SEED=114336 \
+		  env -u DISPLAY -u LD_PRELOAD LC_ALL=C XTANK_DIR="$src" \
+		      XTANK_SEED=114336 \
 		      XTANK_DUMP="$out" XTANK_DUMP_PERIOD="$period" \
-		      XTANK_TICK_LIMIT="$tick" LD_PRELOAD="$EVIDENCE/fixseed.so" \
+		      XTANK_TICK_LIMIT="$tick" "${seedenv[@]}" \
 		      timeout 900 ./xtank-headless -S -D -P -X -F \
 		      "$SCEN_DIR/$scen.settings" ) >"$out.stdout" 2>&1
 	else
 		( cd "$src/Src" && \
-		  env LC_ALL=C DISPLAY=":$XDPY" XTANK_DIR="$src" XTANK_SEED=114336 \
+		  env -u LD_PRELOAD LC_ALL=C DISPLAY=":$XDPY" XTANK_DIR="$src" \
+		      XTANK_SEED=114336 \
 		      XTANK_DUMP="$out" XTANK_DUMP_PERIOD="$period" \
-		      XTANK_TICK_LIMIT="$tick" LD_PRELOAD="$EVIDENCE/fixseed.so" \
+		      XTANK_TICK_LIMIT="$tick" "${seedenv[@]}" \
 		      timeout 900 ./xtank-xcand -S -D -P -X -F \
 		      "$SCEN_DIR/$scen.settings" ":$XDPY" ) >"$out.stdout" 2>&1
 	fi
@@ -344,6 +354,10 @@ run_candidate_v2() {   # $1 scen  $2 out
 	local src="$cand/src"
 	local settings trace
 	settings=$(v2_settings "$scen"); trace=$(v2_trace "$scen")
+	local -a seedenv=()
+	if [ "$STAGE" = "before" ]; then
+		seedenv=(LD_PRELOAD="$EVIDENCE/fixseed.so")
+	fi
 
 	if [ "$SUBJECT" = "null" ]; then
 		# The display-free backend has no X resource database; the explicit
@@ -352,28 +366,30 @@ run_candidate_v2() {   # $1 scen  $2 out
 		# two terminal arguments so both human slots exist (the v2 traces
 		# bind by name).
 		( cd "$src/Src" && \
-		  env -u DISPLAY LC_ALL=C \
+		  env -u DISPLAY -u LD_PRELOAD LC_ALL=C \
 		      XTANK_DIR="$src" XTANK_SEED=114336 \
 		      XTANK_DUMP="$out" XTANK_DUMP_PERIOD="$V2_PERIOD" \
 		      XTANK_DUMP_FORMAT=2 XTANK_TICK_LIMIT="$V2_TICKLIMIT" \
-		      XTANK_TRACE="$trace" LD_PRELOAD="$EVIDENCE/fixseed.so" \
+		      XTANK_TRACE="$trace" "${seedenv[@]}" \
 		      timeout 900 ./xtank-headless -S -D -P -X -F \
 		      "$settings" -p playerA -p playerB nullterm0 nullterm1 ) \
 		    >"$out.stdout" 2>&1
 	elif [ "$SUBJECT" = "headless" ]; then
 		( cd "$src/Src" && \
-		  env -u DISPLAY LC_ALL=C XTANK_DIR="$src" XTANK_SEED=114336 \
+		  env -u DISPLAY -u LD_PRELOAD LC_ALL=C XTANK_DIR="$src" \
+		      XTANK_SEED=114336 \
 		      XTANK_DUMP="$out" XTANK_DUMP_PERIOD="$V2_PERIOD" \
 		      XTANK_DUMP_FORMAT=2 XTANK_TICK_LIMIT="$V2_TICKLIMIT" \
-		      XTANK_TRACE="$trace" LD_PRELOAD="$EVIDENCE/fixseed.so" \
+		      XTANK_TRACE="$trace" "${seedenv[@]}" \
 		      timeout 900 ./xtank-headless -S -D -P -X -F \
 		      "$settings" ) >"$out.stdout" 2>&1
 	else
 		( cd "$src/Src" && \
-		  env LC_ALL=C DISPLAY=":$XDPY" XTANK_DIR="$src" XTANK_SEED=114336 \
+		  env -u LD_PRELOAD LC_ALL=C DISPLAY=":$XDPY" XTANK_DIR="$src" \
+		      XTANK_SEED=114336 \
 		      XTANK_DUMP="$out" XTANK_DUMP_PERIOD="$V2_PERIOD" \
 		      XTANK_DUMP_FORMAT=2 XTANK_TICK_LIMIT="$V2_TICKLIMIT" \
-		      XTANK_TRACE="$trace" LD_PRELOAD="$EVIDENCE/fixseed.so" \
+		      XTANK_TRACE="$trace" "${seedenv[@]}" \
 		      timeout 900 ./xtank-xcand -S -D -P -X -F \
 		      "$settings" ":$XDPY" ":$XDPY2" ) >"$out.stdout" 2>&1
 	fi
