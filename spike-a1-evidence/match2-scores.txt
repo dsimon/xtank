@@ -1,0 +1,19 @@
+Designer: 
+
+Game: Combat     Frame: 4336
+Current score:
+      drone : Vanguard        5320 points     5 kills     3 deaths
+      drone : Vanguard        4000 points     4 kills     4 deaths
+  Neutral: 9320 points
+
+      Alice : Vanguard           0 points     0 kills     1 deaths
+  Red: 0 points
+
+
+
+
+        Bob : Vanguard           0 points     0 kills     1 deaths
+  Blue: 0 points
+
+
+
