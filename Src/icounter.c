@@ -33,6 +33,7 @@
 #include "graphics.h"
 #include "terminal.h"
 #include "vehicle.h"
+#include "server.h"
 #include "proto.h"
 
 #ifdef UNIX
@@ -163,6 +164,11 @@ start_real_counter(int time)
 {
 	struct itimerval real_timer;
 
+	/* Server path: the monotonic loop owns pacing; do not install any
+	   SIGALRM real-time frame timer (P1.9). */
+	if (server_loop_active())
+		return;
+
 	if (!command_options.NoDelay) {
 		/* Set up a real-time interval timer that expires every time useconds.
            Each time it expires, the variable real_timer_expired will be set to
@@ -184,6 +190,11 @@ start_real_counter(int time)
 void
 wait_for_real_counter(void)
 {
+	/* Server path: the monotonic loop already waited on the absolute
+	   deadline; never pause() on a signal-driven frame timer here (P1.9). */
+	if (server_loop_active())
+		return;
+
 	/* The variable real_timer_expires will be set to true when the ITIMER_REAL
        timer expires.  Until then, pause() is called, which gives up process
        control until an interval timer expires. This way we don't waste CPU

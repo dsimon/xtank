@@ -85,8 +85,8 @@ DEFS_BASE="-DUNIX -DS1024x864 -DKEYPAD_DETECT -DSTINGY_REDRAW \
 SRCS_CORE="actions animate box camo collision cosell disc display escher \
 explosion file game gr highlib hit hud icounter init input interface \
 intersect lowlib main mapper maze mdesign menu message newconsole newfile \
-newradar players program radar repair scroll server_core setup setups status \
-sysdep unix update util vdesign vehicle version lex.zz"
+newradar players program radar repair scroll server_core server_loop setup \
+setups status sysdep unix update util vdesign vehicle version lex.zz"
 SRCS_DISP="XMultiSync graphics objects three-d"
 SRCS_THREADS="threadglue thread"
 SRCS_PROGS="Bootlegger Dio Diophantine Flipper drone eliza gnat mmtf rdfbot spot tagman"

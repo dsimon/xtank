@@ -103,6 +103,26 @@ void server_seed_random(unsigned int seed);
 void server_tick_pace(void);
 
 /*
+ * Default simulation rate for the display-free server when no explicit
+ * XTANK_TICK_HZ is configured (P1.9).  The X front-end leaves tick_hz == 0
+ * and keeps the legacy pacer.
+ */
+#define SERVER_DEFAULT_TICK_HZ	15
+
+/*
+ * Monotonic fixed-step loop (P1.9).  server_loop_configure() installs the
+ * configured rate (0 = legacy front-end pacing); server_loop_active() reports
+ * whether the monotonic loop owns pacing.  server_loop_run() advances one
+ * match with absolute 1/tick_hz deadlines and reports bounded per-tick work.
+ */
+void server_loop_configure(int hz);
+int server_loop_active(void);
+int server_loop_hz(void);
+long server_loop_ticks(void);
+void server_loop_pace(int tick);
+int server_loop_run(void);
+
+/*
  * Bounded player-intent queue seam (P1.7).  The queue is consumed exactly
  * once per tick, after bot programs and before movement, by server_step();
  * stale or malformed intents are rejected when submitted, never here.
