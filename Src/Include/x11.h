@@ -24,12 +24,25 @@
  * SUCH DAMAGE.
  */
 
+/*
+** Comment: X11 backend-private declarations.
+**
+** This header is the only place in the tree (besides the X11 translation
+** units themselves) that pulls in <X11/...>.  It must only be included by
+** backend-private code; simulation and bot translation units go through the
+** neutral contract in graphics_backend.h.
+*/
+
 #ifndef INCLUDED_X11_H
 #define INCLUDED_X11_H
 
 #include <assert.h>
 #include <X11/Xlib.h>
 
+/* Neutral limits/types this private header depends on come from graphics.h. */
+#ifndef _GRAPHICS_H_
+#error "x11.h is backend-private; include graphics.h first"
+#endif
 
 #ifdef lint
 /* stupid X11/Xlib.h leaves these undefined, which makes lint complain: */
@@ -39,40 +52,14 @@
   struct XKeytrans {
 	  int x;
   };
-
 #endif
 
-
-#define WIN_exposed	(1<<0)
-#define WIN_mapped      (1<<1)
-
-#define DRAW_XOR	0
-#define DRAW_COPY	1
-#define MAX_DRAW_FUNCS	2
-
-extern Boolean un_stingy;
-
-/*********************
-** Window functions **
-*********************/
-
-#define win_exposed(w) \
-   (vid->win[w].flags & WIN_exposed)
-
-#define win_mapped(w) \
-   (vid->win[w].flags & WIN_mapped)
-
-#define expose_win(w,status) \
-  (status ? (vid->win[w].flags |= WIN_exposed) : \
-            (vid->win[w].flags &= ~WIN_exposed))
-
-#define color_display() \
-  (vid->planes > 1)
+/* XMultiSync.c */
+int XMultiSync(Display *dpys[], int num_dpys, int discard);
 
 /**********************
-** Drawing functions **
+** Batching machinery **
 **********************/
-
 #ifdef BATCH_POINTS
 
 #define BATCHPDEPTH 50
@@ -104,30 +91,6 @@ extern int pointBatchWin;
 #define flush_point_batch
 #endif
 
-#ifndef USE_BATCHED_POINTS
-
-#define draw_point(w,x,y,func,color) \
-  (XDrawPoint(vid->dpy,vid->win[w].id,vid->graph_gc[func][color],x,y))
-
-#else
-
-#define draw_point(w,xx,yy,func,color) \
-	{ \
-		if ( (w != pointBatchWin) || (func != pointBatchFunc) || (pointsBatched[color] == BATCHPDEPTH) ) { \
-			flush_point_batch; \
-			pointBatchWin = w; \
-			pointBatchFunc = func; \
-		}  \
-		pointBatch[color][pointsBatched[color]].x = xx; \
-		pointBatch[color][pointsBatched[color]].y = yy; \
-		++pointsBatched[color]; \
-	}
-#endif
-
-#define draw_points(w,points,num_points,x,y,func,color) \
-  (XDrawPoints(vid->dpy,vid->win[w].id,vid->graph_gc[func][color], \
-	      points,num_points,CoordModeOrigin))
-
 #ifdef BATCH_LINES
 
 #define BATCHDEPTH 80
@@ -148,17 +111,7 @@ extern int lineBatchWin;
 #endif
 
 #ifdef USE_BATCHED_LINES
-#ifndef BATCH_COLOR_LINES
-#define flush_line_batch \
-   if (linesBatched) { \
-      XDrawSegments(vid->dpy, \
-                 vid->win[lineBatchWin].id, \
-                 vid->graph_gc[lineBatchFunc][lineBatchColor], \
-                 lineBatch, \
-                 linesBatched); \
-      linesBatched = 0; \
-  }
-#else /* BATCH_COLOR_LINES */
+#ifdef BATCH_COLOR_LINES
 #define flush_line_batch \
    { \
       int col; \
@@ -173,101 +126,20 @@ extern int lineBatchWin;
          } \
       } \
    }
+#else /* BATCH_COLOR_LINES */
+#define flush_line_batch \
+   if (linesBatched) { \
+      XDrawSegments(vid->dpy, \
+                 vid->win[lineBatchWin].id, \
+                 vid->graph_gc[lineBatchFunc][lineBatchColor], \
+                 lineBatch, \
+                 linesBatched); \
+      linesBatched = 0; \
+  }
 #endif /* BATCH_COLOR_LINES */
 #else
 #define flush_line_batch
 #endif
-
-#ifndef USE_BATCHED_LINES
-
-#define draw_line(w,x1,y1,x2,y2,func,color) \
-  (XDrawLine(vid->dpy,vid->win[w].id,vid->graph_gc[func][color],x1,y1,x2,y2))
-
-#else
-
-#ifdef BATCH_COLOR_LINES
-
-#define draw_line(w,xx1,yy1,xx2,yy2,func,color) \
-   { \
-      if ( (w != lineBatchWin) || (func != lineBatchFunc) || (linesBatched[color] == BATCHDEPTH) ) { \
-         flush_line_batch; \
-         lineBatchWin = w; \
-         lineBatchFunc = func; \
-      }  \
-      lineBatch[color][linesBatched[color]].x1 = xx1; \
-      lineBatch[color][linesBatched[color]].y1 = yy1; \
-      lineBatch[color][linesBatched[color]].x2 = xx2; \
-      lineBatch[color][linesBatched[color]].y2 = yy2; \
-      ++linesBatched[color]; \
-   }
-
-#else /* BATCH_COLOR_LINES */
-
-#define draw_line(w,xx1,yy1,xx2,yy2,func,color) \
-   { \
-      if ( (w != lineBatchWin) || (func != lineBatchFunc) || (color != lineBatchColor) || (linesBatched == BATCHDEPTH) ) { \
-         flush_line_batch; \
-         lineBatchWin = w; \
-         lineBatchFunc = func; \
-         lineBatchColor = color; \
-      }  \
-      lineBatch[linesBatched].x1 = xx1; \
-      lineBatch[linesBatched].y1 = yy1; \
-      lineBatch[linesBatched].x2 = xx2; \
-      lineBatch[linesBatched].y2 = yy2; \
-      ++linesBatched; \
-   }
-
-#endif /* BATCH_COLOR_LINES */
-
-#endif
-
-#define draw_lines(w,lines,num_lines,func,color) \
-  (XDrawSegments(vid->dpy,vid->win[w].id,vid->graph_gc[func][color], \
-	     lines,num_lines,CoordModeOrigin))
-
-#ifndef USE_BATCHED_LINES
-
-#define draw_vert(w,x,y,size,func,color) \
-  (draw_line(w,x,y,x,y+size-1,func,color))
-
-#define draw_hor(w,x,y,size,func,color) \
-  (draw_line(w,x,y,x+size-1,y,func,color))
-
-#else
-
-#define draw_vert(w,x,y,size,func,color) draw_line(w,x,y,x,y+size-1,func,color)
-
-#define draw_hor(w,x,y,size,func,color) draw_line(w,x,y,x+size-1,y,func,color)
-
-#endif
-
-#define draw_rect(w,x,y,width,height,func,color) \
-  (XDrawRectangle(vid->dpy,vid->win[w].id,vid->graph_gc[func][color], \
-		  x,y,width,height))
-
-#define draw_filled_rect(w,x,y,width,height,func,color) \
-  (XFillRectangle(vid->dpy,vid->win[w].id,vid->graph_gc[func][color], \
-		  x,y,width,height))
-
-#define draw_square(w,x,y,size,func,color) \
-  (draw_rect(w,x,y,size,size,func,color))
-
-#define draw_filled_square(w,x,y,size,func,color) \
-  (draw_filled_rect(w,x,y,size,size,func,color))
-
-#define draw_picture(w,x,y,pic,func,color) \
-  { \
-    int tmp_x = x - (pic)->offset_x; \
-    int tmp_y = y - (pic)->offset_y; \
-      if(x > -(pic)->offset_x && tmp_x < vid->win[w].width && \
-         y > -(pic)->offset_y && tmp_y < vid->win[w].height) { \
-	XCopyPlane(vid->dpy, vid->pixid[(pic)->pixmap], vid->win[w].id, \
-                   vid->graph_gc[func][color],0,0, \
-		   vid->width[(pic)->pixmap], vid->height[(pic)->pixmap], \
-                   tmp_x,tmp_y, 1);\
-      } \
- }
 
   typedef struct {
 	  Window id;
@@ -286,7 +158,7 @@ Win;
 	  char keymap[MAX_STRING +1];
   };
 
-  typedef struct {
+  struct video {
 	  char display_name[50];
 	  Display *dpy;
 	  int planes;
@@ -309,16 +181,7 @@ Win;
 	  struct Kludge_Defaults kludge;
 	  int dest_wall;
 	  int rdf_green;
-  }
-Video;
-
-/*
- * Pseudo colors, depends on set_video being
- * called to set vid                 --ane
- */
-
-#define DEST_WALL vid->dest_wall
-#define RDF_SAFE vid->rdf_green
+  };
 
 extern Video *vid;
 

@@ -48,8 +48,7 @@ void init_terminal_3d P_((Terminal *));
 void transform_3d P_((int *, int *));
 void toggle_3d P_((int));
 
-/* XMultiSync.c */
-int XMultiSync P_((Display *dpys[], int num_dpys, int discard));
+/* XMultiSync.c: prototype is backend-private (x11.h). */
 
 /* actions.c */
 void adjust_loc P_((Loc *loc, int dx, int dy));
@@ -588,7 +587,6 @@ int make_picture P_((Picture *, char *));
 void free_picture P_((Picture *));
 Byte *rotate_pic_90 P_((Picture *, Picture *, Byte *));
 Byte *rotate_pic_180 P_((Picture *, Picture *, Byte *));
-static int liteXerror P_((Display *, XErrorEvent *));
 char *get_default P_((char *, char *, char *));
 int get_num_default P_((char *, char *, int));
 

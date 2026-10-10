@@ -34,6 +34,7 @@
 #include "common.h"
 #include "vehicleparts.h"
 #include "object.h"
+#include "graphics_backend.h"
 
   typedef struct {
 	  int x, y;
@@ -93,18 +94,6 @@ Event;
 
 #define LEFT_BORDER  5
 #define TOP_BORDER   5
-
-#ifdef X10
-#include "x10.h"
-#endif
-
-#ifdef X11
-#include "x11.h"
-#endif
-
-#ifdef AMIGA
-#include "amigagfx.h"
-#endif
 
 Video *make_video();
 

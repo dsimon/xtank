@@ -28,7 +28,8 @@
 #include <string.h>
 #include <ctype.h>
 #include "sysdep.h"
-#include "graphics.h"			/* X11 stuff must come after this */
+#include "graphics.h"			/* neutral contract and limits */
+#include "x11.h"			/* backend-private X11 declarations */
 
 #include <X11/Xos.h>
 #include <X11/Xutil.h>
@@ -181,6 +182,119 @@ static int fwidth[MAX_FONTS], fheight[MAX_FONTS], fascent[MAX_FONTS];
 
 Video *vid;
 
+/**************************
+** Neutral state accessors **
+**************************/
+/*
+ * These let presentation callers that do not include x11.h read and update
+ * the small amount of Video state they still need.
+ */
+int
+x11_win_exposed(int w)
+{
+	return (vid->win[w].flags & WIN_exposed);
+}
+
+int
+x11_win_mapped(int w)
+{
+	return (vid->win[w].flags & WIN_mapped);
+}
+
+int
+x11_expose_win(int w, int status)
+{
+	if (status)
+		vid->win[w].flags |= WIN_exposed;
+	else
+		vid->win[w].flags &= ~WIN_exposed;
+	return (vid->win[w].flags);
+}
+
+int
+x11_color_display(void)
+{
+	return (vid->planes > 1);
+}
+
+int
+x11_video_win_flags(int w)
+{
+	return (vid->win[w].flags);
+}
+
+int
+video_toggle_beep(void)
+{
+	return (vid->beep_flag = !vid->beep_flag);
+}
+
+int
+video_escher_width(void)
+{
+	return (vid->escher_width);
+}
+
+char *
+video_player_name(void)
+{
+	return (vid->kludge.player_name);
+}
+
+char *
+video_tank_name(void)
+{
+	return (vid->kludge.tank_name);
+}
+
+int
+video_mouse_speed(void)
+{
+	return (vid->kludge.mouse_speed);
+}
+
+int
+video_mouse_drive(void)
+{
+	return (vid->kludge.mouse_drive);
+}
+
+int
+video_mouse_heat(void)
+{
+	return (vid->kludge.mouse_heat);
+}
+
+char *
+video_keymap(void)
+{
+	return (vid->kludge.keymap);
+}
+
+int
+video_last_expose_frame(Video *v)
+{
+	return (v->last_expose_frame);
+}
+
+const char *
+video_display_name(Video *v)
+{
+	return (v->display_name);
+}
+
+int *
+video_dest_wall(void)
+{
+	return (&vid->dest_wall);
+}
+
+int *
+video_rdf_safe(void)
+{
+	return (&vid->rdf_green);
+}
+
 /******************
 ** Error Handler **
 ******************/
@@ -193,6 +307,8 @@ char video_error_str[256];
 /*********************
 ** Window functions **
 *********************/
+
+static int liteXerror(Display *, XErrorEvent *);
 
 /*
  * Initializes everything dealing with graphics.
@@ -416,7 +532,7 @@ make_window(int w, int x, int y, int width, int height, int border)
  * Beep
  */
 void
-beep_window(void)
+x11_beep_window(void)
 {
 	if (vid->beep_flag) {
 		XBell(vid->dpy, 0);
@@ -459,10 +575,101 @@ clear_window(int w)
 ** Graphics functions **
 ***********************/
 
+/*
+ * X11 drawing implementations.  These are the concrete backend operations
+ * registered in x11_backend below; the neutral entry points in
+ * Src/Display/graphics.c forward to them through the vtable.  Batching is
+ * currently disabled in this build (USE_BATCHED_* are not defined), matching
+ * the original macro expansion exactly.
+ */
+void
+x11_draw_point(int w, int x, int y, int func, int color)
+{
+	XDrawPoint(vid->dpy, vid->win[w].id, vid->graph_gc[func][color], x, y);
+}
+
+void
+x11_draw_line(int w, int x1, int y1, int x2, int y2, int func, int color)
+{
+	XDrawLine(vid->dpy, vid->win[w].id, vid->graph_gc[func][color],
+			  x1, y1, x2, y2);
+}
+
+void
+x11_draw_vert(int w, int x, int y, int size, int func, int color)
+{
+	x11_draw_line(w, x, y, x, y + size - 1, func, color);
+}
+
+void
+x11_draw_hor(int w, int x, int y, int size, int func, int color)
+{
+	x11_draw_line(w, x, y, x + size - 1, y, func, color);
+}
+
+void
+x11_draw_rect(int w, int x, int y, int width, int height, int func, int color)
+{
+	XDrawRectangle(vid->dpy, vid->win[w].id, vid->graph_gc[func][color],
+				   x, y, width, height);
+}
+
+void
+x11_draw_filled_rect(int w, int x, int y, int width, int height, int func, int color)
+{
+	XFillRectangle(vid->dpy, vid->win[w].id, vid->graph_gc[func][color],
+				   x, y, width, height);
+}
+
+void
+x11_draw_square(int w, int x, int y, int size, int func, int color)
+{
+	x11_draw_rect(w, x, y, size, size, func, color);
+}
+
+void
+x11_draw_filled_square(int w, int x, int y, int size, int func, int color)
+{
+	x11_draw_filled_rect(w, x, y, size, size, func, color);
+}
+
+void
+x11_draw_picture(int w, int x, int y, Picture *pic, int func, int color)
+{
+	int tmp_x = x - pic->offset_x;
+	int tmp_y = y - pic->offset_y;
+
+	if (x > -pic->offset_x && tmp_x < vid->win[w].width &&
+		y > -pic->offset_y && tmp_y < vid->win[w].height) {
+		XCopyPlane(vid->dpy, vid->pixid[pic->pixmap], vid->win[w].id,
+				   vid->graph_gc[func][color], 0, 0,
+				   vid->width[pic->pixmap], vid->height[pic->pixmap],
+				   tmp_x, tmp_y, 1);
+	}
+}
+
+void
+x11_draw_arc(int w, int x, int y, int width, int height,
+		 int angle1, int angle2, int func, int color)
+{
+	XDrawArc(vid->dpy, vid->win[w].id, vid->graph_gc[func][color],
+			 x, y, width, height, angle1, angle2);
+}
+
+/*
+ * Backend wrapper for escape-hatch callers (e.g. Programs/Bootlegger.c) that
+ * draw on a Video they hold directly rather than the current global vid.
+ */
+void
+video_draw_line(Video *v, int w, int x1, int y1, int x2, int y2, int func, int color)
+{
+	XDrawLine(v->dpy, v->win[w].id, v->graph_gc[func][color], x1, y1, x2, y2);
+}
+
 /* draw text in an arbitrary position in a window */
 /* x, y - upper left corner */
 void
-draw_text_left(int window, int x, int y, char *str, int font, int func, int color)
+x11_draw_text_left(int window, int x, int y, char *str, int font, int func, int color)
 {
 	XDrawString(vid->dpy, vid->win[window].id,
 		vid->text_gc[font][func][color],
@@ -474,7 +681,7 @@ draw_text_left(int window, int x, int y, char *str, int font, int func, int colo
    coordinate is at the top of the string.  */
 
 void
-draw_text(int w, int x, int y, char *str, int font, int func, int color)
+x11_draw_text(int w, int x, int y, char *str, int font, int func, int color)
 {
 	int len;
 
@@ -522,7 +729,7 @@ should_disp_name(void)
  * as a row and column in the window.
  */
 void
-draw_text_rc(int w, int x, int y, char *str, int font, int color)
+x11_draw_text_rc(int w, int x, int y, char *str, int font, int color)
 {
 	XDrawImageString(vid->dpy, vid->win[w].id,
 			 vid->text_gc[font][DRAW_COPY][color],
@@ -537,7 +744,7 @@ draw_text_rc(int w, int x, int y, char *str, int font, int color)
 void
 clear_text_rc(int w, int x, int y, int width, int height, int font)
 {
-	draw_filled_rect(w,
+	x11_draw_filled_rect(w,
 			 LEFT_BORDER + x * fwidth[font],
 			 TOP_BORDER + y * fheight[font],
 			 width * fwidth[font],
@@ -553,7 +760,7 @@ clear_text_rc(int w, int x, int y, int width, int height, int font)
  * Performs all graphics operations that have been queued up.
  */
 void
-flush_output(void)
+x11_flush_output(void)
 {
 #ifdef USED_BATCHED_POINTS
 	flush_point_batch;
@@ -568,7 +775,7 @@ flush_output(void)
  * Performs all graphics operations and waits until all input is received.
  */
 void
-sync_output(Boolean discard)
+x11_sync_output(Boolean discard)
 {
 	XSync(vid->dpy, discard);
 }
@@ -1291,7 +1498,7 @@ set_cursor(int c)
  * Returns height of the specified font.
  */
 int
-font_height(int font)
+x11_font_height(int font)
 {
 	return (fheight[font]);
 }
@@ -1300,7 +1507,7 @@ font_height(int font)
  * Returns width of the string in the specified font.
  */
 int
-font_string_width(char *str, int font)
+x11_font_string_width(char *str, int font)
 {
 	return (fwidth[font] * strlen(str));
 }
@@ -1645,3 +1852,40 @@ int get_num_default(char *itemname, char *itemclass, int defaultnum)
 
 	return (retval);
 }
+
+/*******************************
+** Backend operations vtable  **
+*******************************/
+/*
+ * The X11 implementation of the neutral GraphicsBackend contract.  Callers
+ * that need to select an operation dynamically (P1.4 routing) can go through
+ * graphics_backend; the legacy draw_* entry points above are wired to the
+ * same functions.
+ */
+static GraphicsBackend x11_backend = {
+	"x11",
+	x11_draw_point,
+	x11_draw_line,
+	x11_draw_vert,
+	x11_draw_hor,
+	x11_draw_rect,
+	x11_draw_filled_rect,
+	x11_draw_square,
+	x11_draw_filled_square,
+	x11_draw_picture,
+	x11_draw_arc,
+	x11_draw_text,
+	x11_draw_text_left,
+	x11_draw_text_rc,
+	x11_beep_window,
+	x11_flush_output,
+	x11_sync_output,
+	x11_video_win_flags,
+	x11_expose_win,
+	x11_win_mapped,
+	x11_color_display,
+	x11_font_height,
+	x11_font_string_width
+};
+
+GraphicsBackend *graphics_backend = &x11_backend;
