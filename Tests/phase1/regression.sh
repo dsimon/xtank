@@ -346,17 +346,20 @@ run_candidate_v2() {   # $1 scen  $2 out
 	settings=$(v2_settings "$scen"); trace=$(v2_trace "$scen")
 
 	if [ "$SUBJECT" = "null" ]; then
-		# The display-free backend has no X resource database; supply the
-		# fixture player names per terminal and give main() two terminal
-		# arguments so both human slots exist (the v2 traces bind by name).
+		# The display-free backend has no X resource database; the explicit
+		# server config binds the fixture player names per terminal with -p
+		# (replacing the former XTANK_NULL_PLAYERS hook) and gives main()
+		# two terminal arguments so both human slots exist (the v2 traces
+		# bind by name).
 		( cd "$src/Src" && \
-		  env -u DISPLAY LC_ALL=C XTANK_NULL_PLAYERS=playerA:playerB \
+		  env -u DISPLAY LC_ALL=C \
 		      XTANK_DIR="$src" XTANK_SEED=114336 \
 		      XTANK_DUMP="$out" XTANK_DUMP_PERIOD="$V2_PERIOD" \
 		      XTANK_DUMP_FORMAT=2 XTANK_TICK_LIMIT="$V2_TICKLIMIT" \
 		      XTANK_TRACE="$trace" LD_PRELOAD="$EVIDENCE/fixseed.so" \
 		      timeout 900 ./xtank-headless -S -D -P -X -F \
-		      "$settings" nullterm0 nullterm1 ) >"$out.stdout" 2>&1
+		      "$settings" -p playerA -p playerB nullterm0 nullterm1 ) \
+		    >"$out.stdout" 2>&1
 	elif [ "$SUBJECT" = "headless" ]; then
 		( cd "$src/Src" && \
 		  env -u DISPLAY LC_ALL=C XTANK_DIR="$src" XTANK_SEED=114336 \

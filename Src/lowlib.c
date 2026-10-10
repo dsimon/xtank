@@ -65,6 +65,16 @@ extern int frame;
 Vehicle *cv;
 
 /*
+** Clears the lowlib current-vehicle pointer.  Called by the server core when
+** a match is torn down so no stale vehicle pointer survives the reset (P1.6).
+*/
+void
+lowlib_forget_vehicle(void)
+{
+	cv = (Vehicle *) NULL;
+}
+
+/*
 ** The check_time function is used to determine when to switch control
 ** back to the program scheduler.
 **

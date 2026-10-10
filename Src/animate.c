@@ -150,8 +150,19 @@ state_dump_v2(int frame_no, unsigned int status)
 
 	(void) warned;
 
-	if (dump_last_frame >= 0 && frame_no < dump_last_frame)
+	if (dump_last_frame >= 0 && frame_no < dump_last_frame) {
+		/*
+		 * New reset epoch (P1.6 lifecycle oracle): the per-tick diff
+		 * baselines are process-global, so re-arm them at the epoch
+		 * boundary to keep each epoch's mutation/exploration records
+		 * self-contained and directly comparable.  Single-epoch runs
+		 * never take this path, so the frozen v2 output is unchanged.
+		 */
 		dump_epoch++;
+		v2_first = 1;
+		for (i = 0; i < MAX_VEHICLES; i++)
+			v2_mapper_prev_valid[i] = 0;
+	}
 	dump_last_frame = frame_no;
 	dump_total++;
 

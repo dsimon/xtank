@@ -45,6 +45,7 @@
 #include <ctype.h>
 #include "sysdep.h"
 #include "graphics.h"			/* neutral contract and limits */
+#include "server.h"
 #include "proto.h"
 
 /********************
@@ -335,40 +336,21 @@ make_video(char *name)
 
 	/*
 	 * A display-free backend has no resource database, so terminal player
-	 * names cannot come from X resources the way the X front-end obtains
-	 * them.  The test harness supplies per-terminal names (colon separated,
-	 * consumed in terminal order) via XTANK_NULL_PLAYERS so the bot-free v2
-	 * oracle can bind named human slots; when unset the name stays empty,
-	 * preserving the legacy v1 behavior.
+	 * names come from the explicit server config (bound in terminal order
+	 * by the -p option) rather than from X resources.  When no binding is
+	 * configured the name stays empty, preserving the legacy v1 behavior.
 	 */
 	{
-		static char *null_players = NULL;
 		static int null_player_next = 0;
+		const char *name = server_player_name(null_player_next++);
 
-		if (null_players == NULL) {
-			null_players = getenv("XTANK_NULL_PLAYERS");
-			if (null_players == NULL)
-				null_players = "";
-		}
-		if (*null_players != '\0') {
-			const char *s = null_players;
-			int k;
+		if (name != NULL && name[0] != '\0') {
+			size_t n = strlen(name);
 
-			for (k = 0; k < null_player_next && *s; k++) {
-				s = strchr(s, ':');
-				if (s != NULL)
-					s++;
-			}
-			if (s != NULL && *s != '\0') {
-				const char *e = strchr(s, ':');
-				size_t n = (e != NULL) ? (size_t) (e - s) : strlen(s);
-
-				if (n > MAX_STRING)
-					n = MAX_STRING;
-				memcpy(video->kludge.player_name, s, n);
-				video->kludge.player_name[n] = '\0';
-			}
-			null_player_next++;
+			if (n > MAX_STRING)
+				n = MAX_STRING;
+			memcpy(video->kludge.player_name, name, n);
+			video->kludge.player_name[n] = '\0';
 		}
 	}
 
