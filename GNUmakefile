@@ -30,7 +30,7 @@
 
 SUBDIR= Src
 
-all clean install phase1-headless phase1-server phase1-core:
+all clean install phase1-headless phase1-server phase1-server-net phase1-core:
 	cd ${SUBDIR} && ${MAKE} $@
 
 # ---------------------------------------------------------------------------
@@ -68,5 +68,40 @@ phase1-check:
 	echo "== boundary: runtime"; bash Tests/phase1/check-x-boundary.sh --runtime; \
 	echo "== P1.16 PHASE1-CHECK PASS"
 
+# ---------------------------------------------------------------------------
+# P2.9 -- Phase 2 client shell (SDL3 3.4.18 + ENet 1.3.18 + Protocol codec).
+# CMake builds only the new client/protocol/transport shell; the Phase 1
+# server, headless and oracle keep the GNUmakefile build above, untouched.
+#
+# Provide the pinned dependency locations, then:
+#   make phase2-client-linux   # native Linux frontend (tests)
+#   make phase2-client-win     # MinGW-w64 x86-64 cross-build (D2-D)
+#   make phase2-client-clean
+#
+# XTK_SDL3_LINUX_PREFIX  install prefix of the Linux-built SDL3 3.4.18
+# XTK_SDL3_MINGW_PREFIX  x86_64-w64-mingw32/ dir of the SDL3 MinGW devel pkg
+# XTK_ENET_DIR           pinned ENet 1.3.18 source tree
+# ---------------------------------------------------------------------------
+XTK_CMAKE           ?= cmake
+XTK_CLIENT_BUILD    ?= /tmp/opencode/xtank-phase2/p2.9/build/root
+XTK_SDL3_LINUX_PREFIX ?=
+XTK_SDL3_MINGW_PREFIX ?=
+XTK_ENET_DIR          ?=
+
+phase2-client-linux:
+	$(XTK_CMAKE) -S . -B $(XTK_CLIENT_BUILD)/linux \
+	    -DCMAKE_PREFIX_PATH=$(XTK_SDL3_LINUX_PREFIX) -DXTK_ENET_DIR=$(XTK_ENET_DIR)
+	$(XTK_CMAKE) --build $(XTK_CLIENT_BUILD)/linux
+
+phase2-client-win:
+	$(XTK_CMAKE) -S . -B $(XTK_CLIENT_BUILD)/win \
+	    -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-w64.cmake \
+	    -DCMAKE_PREFIX_PATH=$(XTK_SDL3_MINGW_PREFIX) -DXTK_ENET_DIR=$(XTK_ENET_DIR)
+	$(XTK_CMAKE) --build $(XTK_CLIENT_BUILD)/win
+
+phase2-client-clean:
+	rm -rf $(XTK_CLIENT_BUILD)
+
 .PHONY: all clean install phase1-headless phase1-server phase1-core \
-	phase1-check ${SUBDIR}
+	phase1-check phase2-client-linux phase2-client-win \
+	phase2-client-clean ${SUBDIR}
