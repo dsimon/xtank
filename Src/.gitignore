@@ -12,7 +12,11 @@ xtank
 xtank.full
 xtank.debug
 xtank-headless
+xtank-server
+xtank-server-net
 xobj
 nobj
+sobj
+netobj
 *.o
 *.d

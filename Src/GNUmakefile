@@ -75,6 +75,7 @@ SCFLAGS+= -MMD -MP
 XOBJ=	xobj
 NOBJ=	nobj
 SOBJ=	sobj
+NETOBJ=	netobj
 
 XOBJS=	$(addprefix ${XOBJ}/,$(SRCS:.c=.o))
 NOBJS=	$(addprefix ${NOBJ}/,$(SERVER_SRCS:.c=.o))
@@ -86,12 +87,32 @@ SOBJS=	$(addprefix ${SOBJ}/,$(CORE_SRCS:.c=.o))
 XTANK=	xtank
 XTANK_HEADLESS=	xtank-headless
 XTANK_SERVER=	xtank-server
+XTANK_SERVER_NET=	xtank-server-net
 
 all:	${XTANK} ${XTANK_HEADLESS} ${XTANK_SERVER}
 
 phase1-headless: ${XTANK_HEADLESS}
 
 phase1-server: ${XTANK_SERVER}
+
+# ---------------------------------------------------------------------------
+# P2.8 opt-in network server (one peer + one drone lobby/session).  Requires
+# the pinned ENet v1.3.18 source tree via ENET_DIR; it is NOT part of `all`,
+# so the default local server build keeps no transport dependency.
+# ---------------------------------------------------------------------------
+ENET_DIR ?=
+ENET_SRCS= callbacks.c compress.c host.c list.c packet.c peer.c protocol.c unix.c
+
+NET_CORE_OBJS=	$(filter-out ${SOBJ}/server_main.o,${SOBJS})
+NET_OBJS=	${NETOBJ}/server_main.o ${NETOBJ}/server_session.o \
+		${NETOBJ}/server_net.o ${NETOBJ}/enet_transport.o \
+		$(addprefix ${NETOBJ}/proto-,${PROTOCOL_SRCS:.c=.o}) \
+		$(addprefix ${NETOBJ}/enet/,${ENET_SRCS:.c=.o})
+
+phase1-server-net: ${XTANK_SERVER_NET}
+
+${XTANK_SERVER_NET}: ${NET_CORE_OBJS} ${NET_OBJS}
+	${CC} ${LDFLAGS} $^ -lm -o $@
 
 # Reusable display-free simulation core (server object set without the entry).
 phase1-core: ${SOBJS}
@@ -131,6 +152,32 @@ ${XOBJ}/%.o: %.c
 	@mkdir -p ${XOBJ}
 	${CC} ${XCFLAGS} -c $< -o $@
 
+# P2.8 network-server objects: the entry point and session are compiled with
+# -DXTANK_WITH_NET; the admission layer is transport-neutral.
+${NETOBJ}/server_main.o: server_main.c
+	@mkdir -p ${NETOBJ}
+	${CC} ${SCFLAGS} -DXTANK_WITH_NET -c $< -o $@
+
+${NETOBJ}/server_session.o: server_session.c
+	@mkdir -p ${NETOBJ}
+	${CC} ${SCFLAGS} -DXTANK_WITH_NET -c $< -o $@
+
+${NETOBJ}/server_net.o: server_net.c
+	@mkdir -p ${NETOBJ}
+	${CC} ${SCFLAGS} -c $< -o $@
+
+${NETOBJ}/enet_transport.o: ../Transport/enet_transport.c
+	@mkdir -p ${NETOBJ}
+	${CC} -O0 -g -w -I${ENET_DIR}/include -c $< -o $@
+
+${NETOBJ}/proto-%.o: ../Protocol/%.c
+	@mkdir -p ${NETOBJ}
+	${CC} -O0 -g -w -I../Protocol -c $< -o $@
+
+${NETOBJ}/enet/%.o: ${ENET_DIR}/%.c
+	@mkdir -p ${NETOBJ}/enet
+	${CC} -O0 -g -w -I${ENET_DIR}/include -c $< -o $@
+
 # Print the explicit server translation-unit list (used by the boundary
 # checker); does not build anything.
 print-server-srcs:
@@ -148,8 +195,9 @@ print-core-srcs:
 include ${.CURDIR}/Makefile.inc2
 
 clean:
-	rm -f ${XTANK} ${XTANK_HEADLESS} ${XTANK_SERVER} ${CLEANFILES} *.core
-	rm -rf ${XOBJ} ${NOBJ} ${SOBJ}
+	rm -f ${XTANK} ${XTANK_HEADLESS} ${XTANK_SERVER} ${XTANK_SERVER_NET} \
+		${CLEANFILES} *.core
+	rm -rf ${XOBJ} ${NOBJ} ${SOBJ} ${NETOBJ}
 
-.PHONY: all clean install phase1-headless phase1-server phase1-core \
-	phase1-check print-server-srcs print-core-srcs
+.PHONY: all clean install phase1-headless phase1-server phase1-server-net \
+	phase1-core phase1-check print-server-srcs print-core-srcs

@@ -147,6 +147,21 @@ loop_deadline_ns(long tick)
 	return loop_t0_ns + (long long) tick * 1000000000LL / (long long) loop_hz;
 }
 
+static void loop_reset(void);
+
+/*
+ * P2.8: let a session-driven loop (server_session_run) reuse the exact same
+ * absolute-deadline pacer as the production loop.  Rebases the monotonic epoch
+ * so a session epoch starts a fresh 1/tick_hz schedule; server_loop_pace() is
+ * then called by the session before each step.  A build without the session
+ * module never calls this.
+ */
+void
+server_loop_epoch_begin(void)
+{
+	loop_reset();
+}
+
 static void
 loop_reset(void)
 {

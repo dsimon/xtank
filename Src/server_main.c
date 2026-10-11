@@ -58,6 +58,9 @@
 #include "vehicle.h"
 #include "server.h"
 #include "proto.h"
+#ifdef XTANK_WITH_NET
+#include "server_session.h"
+#endif
 
 extern char username[MAX_STRING];
 extern Mdesc *mdesc;
@@ -125,6 +128,7 @@ server_usage(const char *prog)
 	printf("  --matches N        matches to play/reset (default 1)\n");
 	printf("  --max-ticks N      bound each match to N ticks (0 = unlimited)\n");
 	printf("  --assets DIR       explicit asset root\n");
+	printf("  --listen PORT      run the P2.8 network-server lobby/session\n");
 	printf("  --fast             bypass wall-clock pacing (replay)\n");
 	printf("  --version          print version and exit\n");
 	printf("  --help             this message\n");
@@ -232,6 +236,7 @@ main(int argc, char *argv[])
 	long drones = -1;
 	long matches = 1;
 	long max_ticks = 0;
+	long listen_port = -1;
 	int seed_given = 0;
 	unsigned long seed = 0;
 	int fast = 0;
@@ -273,6 +278,16 @@ main(int argc, char *argv[])
 			}
 		} else if (!strcmp(a, "--assets") && has_next) {
 			assets = argv[++i];
+		} else if (!strcmp(a, "--listen") && has_next) {
+			char *end;
+
+			listen_port = strtol(argv[++i], &end, 10);
+			if (*end != '\0' || listen_port < 0 ||
+			    listen_port > 65535) {
+				fprintf(stderr, "%s: malformed --listen port\n",
+						prog);
+				return 2;
+			}
 		} else if (!strcmp(a, "--drones") && has_next) {
 			drones = atol(argv[++i]);
 		} else if (!strcmp(a, "--matches") && has_next) {
@@ -371,6 +386,23 @@ main(int argc, char *argv[])
 	init_box_names();
 	geometry_order_objects();
 	geometry_rotate_objects();
+
+	/*
+	 * P2.8 optional listen mode: one peer + one drone lobby/session driven
+	 * entirely by the protocol (content is chosen and loaded per START).
+	 * This preserves the Phase 1 local CLI above; without a networking build
+	 * the option is reported unavailable rather than silently ignored.
+	 */
+	if (listen_port >= 0) {
+#ifdef XTANK_WITH_NET
+		return server_session_run((uint16_t) listen_port, fast,
+					  max_ticks);
+#else
+		fprintf(stderr, "%s: --listen is unavailable: this server was "
+				"built without networking\n", prog);
+		return 2;
+#endif
+	}
 
 	/* Load the supplied assets by explicit name, with no directory list. */
 	if (make_vdesc((char *) vehicle_name, &vdesc_index) != DESC_LOADED) {

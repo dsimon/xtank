@@ -131,3 +131,16 @@ SERVER_CORE_SRCS= $(filter-out $(X_SRCS) $(SERVER_ONLY_EXCLUDE) \
 
 # Common feature defines with DYNALOAD removed (the server never dlopens).
 SERVER_COMMON_DEFS= $(filter-out -DDYNALOAD,$(COMMON_DEFS))
+
+#
+# P2.8 -- networked server translation units and the frozen protocol codec.
+#
+# These are deliberately NOT part of SERVER_SRCS or SERVER_CORE_SRCS: the
+# default Phase 1 local server must build (and be packaged) with no external
+# transport dependency.  They are linked only by the opt-in network-server
+# target (GNUmakefile phase1-server-net, -DXTANK_WITH_NET), which also links
+# the pinned ENet v1.3.18 transport.  Keeping them out of the default list is
+# what makes no-peer parity structural rather than merely gated.
+#
+SERVER_NET_SRCS=	server_session.c server_net.c
+PROTOCOL_SRCS=		content-manifest.c encode.c decode.c

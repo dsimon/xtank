@@ -34,27 +34,46 @@ BINARY=""
 OUT=""
 NAME="xtank-server"
 MAKE_TAR=0
+NET=0
+ENET_DIR="${XTANK_ENET_DIR:-}"
 
 usage() {
 	cat >&2 <<'EOF'
 usage: package-server.sh [--src ROOT] [--binary PATH] [--out DIR]
-                         [--name NAME] [--tar]
+                         [--name NAME] [--net] [--enet-dir DIR] [--tar]
+
+  --net          build and package the P2.8 network server
+                 (Src/xtank-server-net, requires the pinned ENet source via
+                 --enet-dir or XTANK_ENET_DIR) as bin/xtank-server
 EOF
 	exit 2
 }
 
 while [ $# -gt 0 ]; do
 	case "$1" in
-	  --src)    SRC="$2"; shift 2 ;;
-	  --binary) BINARY="$2"; shift 2 ;;
-	  --out)    OUT="$2"; shift 2 ;;
-	  --name)   NAME="$2"; shift 2 ;;
-	  --tar)    MAKE_TAR=1; shift ;;
+	  --src)      SRC="$2"; shift 2 ;;
+	  --binary)   BINARY="$2"; shift 2 ;;
+	  --out)      OUT="$2"; shift 2 ;;
+	  --name)     NAME="$2"; shift 2 ;;
+	  --net)      NET=1; shift ;;
+	  --enet-dir) ENET_DIR="$2"; shift 2 ;;
+	  --tar)      MAKE_TAR=1; shift ;;
 	  *) usage ;;
 	esac
 done
 
 [ -d "$SRC" ] || { echo "package-server: no such source root: $SRC" >&2; exit 2; }
+if [ "$NET" = "1" ]; then
+	[ -n "$ENET_DIR" ] || {
+		echo "package-server: --net requires --enet-dir (or XTANK_ENET_DIR)" >&2
+		exit 2
+	}
+	( cd "$SRC" && make -s phase1-server-net ENET_DIR="$ENET_DIR" ) || {
+		echo "package-server: network server build failed" >&2
+		exit 2
+	}
+	BINARY="$SRC/Src/xtank-server-net"
+fi
 [ -n "$BINARY" ] || BINARY="$SRC/Src/xtank-server"
 [ -n "$OUT" ] || OUT="$SRC/xtank-server-bundle"
 
