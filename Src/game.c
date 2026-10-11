@@ -50,6 +50,14 @@ extern Map real_map;
 extern int frame;
 extern CLFkr command_options;
 
+/*
+** P2.6 reviewed read-only result hook.  Copies the immutable match result while
+** the combatant scores still exist, before game_finalize_scores() zeroes them.
+** Weak so the frozen Phase 1 regression candidate (which does not link
+** server_events.c) is unchanged.
+*/
+extern void server_events_capture_results(int, int) __attribute__((weak));
+
 
 TeamData teamdata[MAX_TEAMS];
 Team last_team;					/* the highest-numbered team that's playing
@@ -502,6 +510,11 @@ game_finalize_scores(int status)
 	if (command_options.PrintScores) {
 		display_game_stats_to_current(status, -1);
 	}
+	/* P2.6: capture the immutable result before the per-match score reset. */
+	if (server_events_capture_results)
+		server_events_capture_results(status,
+			(status == GAME_RESET && winning_vehicle != NULL) ?
+			winning_vehicle->number : -1);
 	if (settings.si.game != ULTIMATE_GAME) {
 		int j;
 

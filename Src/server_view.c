@@ -46,6 +46,7 @@
 #include "special.h"
 #include "globals.h"
 #include "server_view.h"
+#include "server_events.h"
 
 /* Simulation globals read (never written) by the exporter. */
 extern int frame;
@@ -86,17 +87,6 @@ lifecycle_flags(const Vehicle *v)
 	return (uint16_t) (v->status & SERVER_LIFECYCLE_MASK);
 }
 
-/*
-** Provisional P2.5 lifetime value: the number of deaths the owner has recorded
-** (+1 so the first life is 1).  P2.6 replaces this with a dedicated export-side
-** entity-generation counter; the stable key shape is unchanged.
-*/
-static uint32_t
-entity_generation(const Combatant *c)
-{
-	return (c != NULL) ? (uint32_t) (c->deaths + 1) : 0u;
-}
-
 int
 server_view_half_extent(void)
 {
@@ -135,7 +125,8 @@ export_self(const Vehicle *own, XtkSelfState *s)
 	int i;
 
 	s->slot = (uint8_t) own->number;
-	s->generation = (uint8_t) entity_generation(own->owner);
+	s->generation = (uint8_t) server_events_generation(XTK_ENTITY_VEHICLE,
+							   (uint16_t) own->number);
 	s->lifecycle_flags = lifecycle_flags(own);
 
 	s->armor[0] = clamp_u16_int(own->armor.side[FRONT]);
@@ -181,7 +172,13 @@ server_view_export(int player_slot, unsigned int generation,
 	if (own == NULL)
 		return SERVER_VIEW_ERR_NO_VEHICLE;
 
-	gen = entity_generation(c);
+	/*
+	 * Bring the export-side entity-lifetime counters current before reading
+	 * them (idempotent within a tick); the stable key is unchanged.
+	 */
+	server_events_observe();
+
+	gen = server_events_generation(XTK_ENTITY_VEHICLE, (uint16_t) own->number);
 	if (generation != 0 && gen != generation)
 		return SERVER_VIEW_ERR_GENERATION;
 
@@ -213,7 +210,8 @@ server_view_export(int player_slot, unsigned int generation,
 
 		vv = &out->vehicle[vcount++];
 		vv->slot = (uint8_t) v->number;
-		vv->generation = (uint8_t) entity_generation(v->owner);
+		vv->generation = (uint8_t) server_events_generation(
+			XTK_ENTITY_VEHICLE, (uint16_t) v->number);
 		vv->kind = (uint8_t) v->vdesc->body;
 		vv->flags = (uint8_t) (lifecycle_flags(v) & 0xFF);
 		vv->x = v->loc->x;
@@ -249,7 +247,9 @@ server_view_export(int player_slot, unsigned int generation,
 		bv->owner_slot = (b->owner != NULL) ?
 			(uint8_t) b->owner->number : 0xFF;
 		bv->owner_generation = (b->owner != NULL) ?
-			(uint8_t) entity_generation(b->owner->owner) : 0;
+			(uint8_t) server_events_generation(
+				XTK_ENTITY_VEHICLE,
+				(uint16_t) b->owner->number) : 0;
 		bv->kind = (uint8_t) b->type;
 	}
 

@@ -71,7 +71,8 @@ SRCS=	actions.c animate.c box.c camo.c collision.c cosell.c \
 	intersect.c lowlib.c main.c mapper.c maze.c \
 	mdesign.c menu.c message.c newconsole.c newfile.c newradar.c \
 	players.c program.c radar.c repair.c scroll.c server_core.c \
-	server_loop.c server_players.c server_view.c setup.c statdata.c \
+	server_events.c server_loop.c server_players.c server_view.c \
+	setup.c statdata.c \
 	setups.c status.c sysdep.c unix.c update.c util.c vdesign.c \
 	vehicle.c version.c lex.zz.c
 SRCS+=	XMultiSync.c graphics.c objects.c three-d.c

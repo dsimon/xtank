@@ -48,6 +48,16 @@ extern Map real_map;
 extern Settings settings;
 extern int frame;
 
+/*
+** P2.6 reviewed read-only transient hooks.  They record a simulation
+** transition in the export-side event stream (Src/server_events.c) and have
+** no effect on gameplay, RNG or control flow.  Declared weak so the frozen
+** Phase 1 regression candidate -- which does not link server_events.c --
+** resolves them to no-ops and stays byte-identical.
+*/
+extern void server_events_note_death(int, int) __attribute__((weak));
+extern void server_events_note_spawn(int, double, double) __attribute__((weak));
+
 /* create turrets for the given vehicle */
 
 static void
@@ -361,6 +371,11 @@ activate_vehicle(Vehicle *v)
 
 	init_vehicle_status(v);
 
+	/* P2.6: advance the export-side vehicle lifetime generation for this life. */
+	if (server_events_note_spawn)
+		server_events_note_spawn(v->number, (double) v->loc->x,
+					 (double) v->loc->y);
+
 	return GAME_RUNNING;
 }
 
@@ -585,6 +600,11 @@ kill_vehicle(Vehicle *victim, Vehicle *killer) /* killer can be NULL */
 	}
 
 	victim->owner->deaths++;
+
+	/* P2.6: record the death transition (killer slot, or none). */
+	if (server_events_note_death)
+		server_events_note_death(victim->number,
+					 (killer != NULL) ? killer->number : -1);
 
 	if (killer) {
 #ifdef SOUND
