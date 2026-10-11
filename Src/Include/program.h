@@ -43,6 +43,24 @@
   }
 Prog_desc;
 
+/*
+ * P1.13 tick-cooperative scheduling.  The X front-end keeps the legacy
+ * CPU-time scheduler (virtual interval timer + check_time()).  The
+ * display-free server runs every eligible program exactly one iteration per
+ * tick and relies on the program yielding at done(); threadglue.c selects the
+ * mode at startup from server_loop_active().
+ */
+void program_set_cooperative(int on);
+int program_cooperative(void);
+
+/*
+ * Bot yield watchdog (server path only).  Armed around one program run, it
+ * diagnoses a program that fails to yield (and so would otherwise hang the
+ * scheduler) and aborts; it never preempts or silently yields the program.
+ */
+void program_watchdog_start(void);
+void program_watchdog_stop(void);
+
 typedef struct {
 	Prog_desc *desc;	/* description of program */
 	int status;		/* status of program */

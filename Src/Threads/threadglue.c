@@ -29,6 +29,7 @@
 #include "xtank.h"
 #include "thread.h"
 #include "icounter.h"
+#include "server.h"
 #include "proto.h"
 
 /* Pointer to the program scheduler's thread */
@@ -44,6 +45,14 @@ init_threader(void)
 
 	/* Initialize threading system */
 	scheduler_thread = thread_setup();
+
+	/*
+	 * P1.13: the monotonic server loop owns pacing and runs bots
+	 * cooperatively (one iteration/yield per eligible tick), so its
+	 * scheduler never makes CPU-time decisions.  The legacy X front-end
+	 * (server_loop_active() == 0) keeps the CPU-time scheduler unchanged.
+	 */
+	program_set_cooperative(server_loop_active());
 
 	/* how 'bout some error checking here? */
 

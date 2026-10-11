@@ -33,6 +33,7 @@
 #include "graphics.h"
 #include "terminal.h"
 #include "vehicle.h"
+#include "program.h"
 #include "server.h"
 #include "proto.h"
 
@@ -49,6 +50,46 @@
 int elapsed_time;
 
 /*
+** P1.13 bot yield watchdog.  In tick-cooperative server mode this virtual
+** timer is armed around a single program run.  If the program does not yield
+** within the configured amount of CPU time, the scheduler is hung: the
+** watchdog reports the bot and aborts.  It never preempts or silently yields
+** the program, so scheduling is unchanged for a well-behaved bot.
+*/
+static volatile sig_atomic_t watchdog_watching = 0;
+static long watchdog_limit_us = 1000000;	/* 1 s of CPU, overridable */
+static int watchdog_inited = 0;
+
+extern Vehicle *cv;
+extern int frame;
+
+static void
+watchdog_report(void)
+{
+	char buf[192];
+	int n;
+	const char *name = "?";
+	int veh = -1;
+
+	if (cv != NULL) {
+		veh = (int) cv->number;
+		if (cv->current_prog != NULL &&
+		    cv->current_prog->desc != NULL &&
+		    cv->current_prog->desc->name != NULL)
+			name = cv->current_prog->desc->name;
+	}
+	n = snprintf(buf, sizeof(buf),
+		"XTANK WATCHDOG: bot '%s' (vehicle %d) did not yield in %ld ms "
+		"of cpu time at frame %d\n",
+		name, veh, watchdog_limit_us / 1000, frame);
+	if (n > (int) sizeof(buf) - 1)
+		n = (int) sizeof(buf) - 1;
+	if (n > 0)
+		(void) write(STDERR_FILENO, buf, (size_t) n);
+	_exit(70);
+}
+
+/*
 ** Virtual timer alarm handler.  Updates how much time has passed
 ** by incrementing elapsed_time by INC_TIME.
 */
@@ -57,6 +98,9 @@ static void
 increment_time(int sig /* __unused */)
 {
 	elapsed_time += INC_TIME;
+	if (watchdog_watching && watchdog_limit_us > 0 &&
+	    elapsed_time >= watchdog_limit_us)
+		watchdog_report();
 #ifdef mmax
 	sigset(SIGVTALRM, increment_time);
 #endif
@@ -118,6 +162,46 @@ start_counter(void)
 void
 stop_counter(void)
 {
+#if defined(MOTOROLA) && defined(m68k)
+	(void) alarm(stop_val);
+#else
+	(void) setitimer(ITIMER_VIRTUAL, &stop_val, (struct itimerval *) NULL);
+#endif
+}
+
+/*
+** P1.13 watchdog arm/disarm.  Same virtual timer as the legacy CPU-time
+** scheduler, but here elapsed_time is consulted only to diagnose a bot that
+** fails to yield -- never to decide who runs.
+*/
+void
+program_watchdog_start(void)
+{
+	const char *e;
+
+	if (!watchdog_inited) {
+		e = getenv("XTANK_BOT_WATCHDOG_MS");
+		if (e != NULL) {
+			long ms = atol(e);
+
+			if (ms > 0)
+				watchdog_limit_us = ms * 1000;
+		}
+		watchdog_inited = 1;
+	}
+	elapsed_time = 0;
+	watchdog_watching = 1;
+#if defined(MOTOROLA) && defined(m68k)
+	(void) alarm(start_val);
+#else
+	(void) setitimer(ITIMER_VIRTUAL, &start_val, (struct itimerval *) NULL);
+#endif
+}
+
+void
+program_watchdog_stop(void)
+{
+	watchdog_watching = 0;
 #if defined(MOTOROLA) && defined(m68k)
 	(void) alarm(stop_val);
 #else
