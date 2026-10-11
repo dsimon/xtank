@@ -14,6 +14,8 @@
 
 #include <stdint.h>
 
+#include "input.h"	/* neutral XtkControl vocabulary */
+
 typedef struct ClientPlatform ClientPlatform;
 
 /* Event/timer/drawable state accumulated by client_platform_pump(). */
@@ -24,10 +26,23 @@ typedef struct {
 	int   mouse_motion;		/* count of MOUSE_MOTION events           */
 	int   mouse_button;		/* count of MOUSE_BUTTON_* events         */
 	int   resized;			/* count of RESIZED / PIXEL_SIZE_CHANGED  */
+	int   focus_lost;		/* count of WINDOW_FOCUS_LOST events      */
+	int   focus_gained;		/* count of WINDOW_FOCUS_GAINED events    */
 	int   last_key;			/* last SDL_Keycode seen                  */
+	int   last_scancode;		/* last SDL scancode seen                 */
 	int   last_button;		/* last mouse button index                */
 	float mouse_x, mouse_y;		/* last mouse position, logical window pts */
 } ClientEvents;
+
+/*
+ * Map a physical SDL scancode or mouse button to the neutral client control
+ * vocabulary.  This is the ONLY place SDL scancodes meet client controls; the
+ * neutral XtkControl values are then mapped to wire ops in Client/input.c and
+ * the wire ops to engine intents on the server.  XTK_CTL_NONE means the input
+ * is not a gameplay control.
+ */
+XtkControl xtk_sdl_scancode_to_control(int scancode);
+XtkControl xtk_sdl_button_to_control(int button);
 
 /*
  * Pure DPI/coordinate helpers (no SDL dependency) so the transform can be
@@ -86,6 +101,9 @@ void client_platform_inject_mouse_button(ClientPlatform *p, int button, int down
 
 /* Push a synthetic SDL_EVENT_QUIT. */
 void client_platform_inject_quit(ClientPlatform *p);
+
+/* Push a synthetic window focus-gained/focus-lost event. */
+void client_platform_inject_focus(ClientPlatform *p, int focused);
 
 /* Draw one full frame (clear + simple placeholder geometry) and present. */
 void client_platform_render(ClientPlatform *p);
