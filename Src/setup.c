@@ -252,7 +252,7 @@ play_game(void)
 		newgame = TRUE;
 	}
 	do {
-#ifdef GRAPHICS_POINTER_INPUT_ALWAYS_ON
+#if defined(GRAPHICS_POINTER_INPUT_ALWAYS_ON) && !defined(NULL_BACKEND)
 		button_up(ANIM_WIN, FALSE);
 		follow_mouse(ANIM_WIN, FALSE);
 #endif
@@ -273,9 +273,9 @@ play_game(void)
 		play_all(START_SOUND);
 #endif /* SOUND */
 
-		do {
-			status = server_step();
-		} while (status == GAME_RUNNING);
+		/* Fixed-step monotonic loop (P1.9): one server_step() per tick
+		   against absolute deadlines; it returns the final status. */
+		status = server_loop_run();
 
 #ifdef SOUND
 		play_all(END_SOUND);
@@ -283,7 +283,15 @@ play_game(void)
 
 		game_running = False;
 
-		status = display_game_stats(status);
+		/*
+		 * P1.14: the display-free server finalizes the match result
+		 * without a graphical stats wait or event loop; the X front-end
+		 * keeps the interactive stats screen.
+		 */
+		if (server_presentation_active())
+			status = display_game_stats(status);
+		else
+			status = game_results(status);
 
 		server_match_reset();	/* nuking all the vehicles here is overkill */
 	} while (status == GAME_RESET || server_lifecycle_continue());
@@ -301,7 +309,7 @@ play_game(void)
 	/* Return to terminal 0 for the user interface */
 	set_terminal(0);
 
-#ifdef GRAPHICS_POINTER_INPUT_ALWAYS_ON
+#if defined(GRAPHICS_POINTER_INPUT_ALWAYS_ON) && !defined(NULL_BACKEND)
 	button_up(ANIM_WIN, TRUE);
 	follow_mouse(ANIM_WIN, TRUE);
 #endif
@@ -363,8 +371,12 @@ setup_game(Boolean newgame)
 	/* Initialize the game speed */
 	set_game_speed(settings.game_speed);
 
+#ifdef NULL_BACKEND
+	/* Display-free server (P1.12): there is no terminal to flush/synchronize. */
+#else
 	/* Flush the input */
 	sync_terminals(TRUE);
+#endif
 
 	return GAME_RUNNING;
 }

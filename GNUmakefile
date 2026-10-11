@@ -30,7 +30,43 @@
 
 SUBDIR= Src
 
-all clean install phase1-headless:
+all clean install phase1-headless phase1-server phase1-core:
 	cd ${SUBDIR} && ${MAKE} $@
 
-.PHONY: all clean install phase1-headless ${SUBDIR}
+# ---------------------------------------------------------------------------
+# P1.16 -- Phase 1 exit gate.  Runs the frozen-pin X versus headless
+# characterization (the full regression oracle), then the geometry, intent,
+# lifecycle, content, package and X-boundary acceptance checks.  The 15 Hz
+# timing measurement (Tests/phase1/timing.sh) and the 60-minute bot soak
+# (Tests/phase1/bots.sh) are recorded separately and are NOT part of this
+# target, per the P1.16 contract.
+#
+# All dumps, logs, binaries and reference worktrees are kept outside the
+# checkout under ${XTANK_P1_EVIDENCE:-/tmp/opencode/xtank-phase1/p1.16}.
+#
+# Usage: make phase1-check
+# ---------------------------------------------------------------------------
+PHASE1_EVIDENCE ?= /tmp/opencode/xtank-phase1/p1.16
+PHASE1_SUBJECT  ?= null
+
+phase1-check:
+	@set -e; \
+	export XTANK_P1_EVIDENCE="$(PHASE1_EVIDENCE)"; \
+	export TAR_OPTIONS="$${TAR_OPTIONS:---no-same-owner}"; \
+	mkdir -p "$$XTANK_P1_EVIDENCE"; \
+	echo "== P1.16 phase1-check (subject $(PHASE1_SUBJECT))"; \
+	echo "== full oracle: frozen X vs headless characterization"; \
+	bash Tests/phase1/regression.sh --suite full --stage after --subject $(PHASE1_SUBJECT); \
+	echo "== geometry"; bash Tests/phase1/geometry.sh; \
+	echo "== intent";   bash Tests/phase1/intent.sh; \
+	echo "== lifecycle"; bash Tests/phase1/lifecycle.sh; \
+	echo "== content";  bash Tests/phase1/content.sh; \
+	echo "== package";  bash Tests/phase1/package.sh; \
+	echo "== boundary: headers"; bash Tests/phase1/check-x-boundary.sh --headers; \
+	echo "== boundary: sources"; bash Tests/phase1/check-x-boundary.sh --sources; \
+	echo "== boundary: build";   bash Tests/phase1/check-x-boundary.sh --build; \
+	echo "== boundary: runtime"; bash Tests/phase1/check-x-boundary.sh --runtime; \
+	echo "== P1.16 PHASE1-CHECK PASS"
+
+.PHONY: all clean install phase1-headless phase1-server phase1-core \
+	phase1-check ${SUBDIR}

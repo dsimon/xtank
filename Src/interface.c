@@ -567,6 +567,15 @@ void
 sub_interface_design(int choice)
 {
 	switch (choice) {
+#ifdef SERVER_ONLY
+	  /*
+	   * The shipped server excludes the maze/vehicle designers
+	   * (mdesign.c/vdesign.c); this interactive entry point is never reached
+	   * without the X front-end lobby.
+	   */
+	  (void) choice;
+	  break;
+#else
 	  case 0:
 		  design_maze();
 		  expose_win(ANIM_WIN, TRUE);
@@ -575,6 +584,7 @@ sub_interface_design(int choice)
 		  design_vehicle();
 		  expose_win(ANIM_WIN, TRUE);
 		  break;
+#endif
 	}
 	menu_unhighlight(&menu_sys, DESIGN_MENU);
 }
@@ -1461,6 +1471,15 @@ interface_play(void)
 void
 do_view(int menu, int choice)
 {
+#ifdef SERVER_ONLY
+	/*
+	 * The shipped server has no lobby and links no designers; this
+	 * interactive "view" path is never reached.
+	 */
+	(void) menu;
+	(void) choice;
+	return;
+#else
 	clear_window(ANIM_WIN);
 	switch (menu) {
 	  case VEHICLES_MENU:
@@ -1484,6 +1503,7 @@ do_view(int menu, int choice)
 	iprint("Hit any key or button to continue", 0, 50);
 	wait_input();
 	expose_win(ANIM_WIN, TRUE);
+#endif
 }
 
 /*
@@ -1492,9 +1512,14 @@ do_view(int menu, int choice)
 void
 display_mdesc(Mdesc *d)
 {
+#ifdef SERVER_ONLY
+	/* Designers are not linked into the shipped server. */
+	(void) d;
+#else
 	make_maze(d);
 	display_mdesc_maze();
 	display_mdesc_info(d);
+#endif
 }
 
 /*

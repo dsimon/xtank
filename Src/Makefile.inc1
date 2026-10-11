@@ -71,7 +71,7 @@ SRCS=	actions.c animate.c box.c camo.c collision.c cosell.c \
 	intersect.c lowlib.c main.c mapper.c maze.c \
 	mdesign.c menu.c message.c newconsole.c newfile.c newradar.c \
 	players.c program.c radar.c repair.c scroll.c server_core.c \
-	server_loop.c setup.c \
+	server_loop.c setup.c statdata.c \
 	setups.c status.c sysdep.c unix.c update.c util.c vdesign.c \
 	vehicle.c version.c lex.zz.c
 SRCS+=	XMultiSync.c graphics.c objects.c three-d.c
@@ -101,3 +101,32 @@ X_SRCS=	XMultiSync.c
 # only under -DX11 and never enter the server build.
 #
 SERVER_SRCS= $(filter-out $(X_SRCS),$(SRCS))
+
+#
+# P1.15 -- shipped local server (Src/xtank-server).
+#
+# The server is genuinely terminal-free and links only the shared simulation
+# core plus the drone program: no X front-end entry point (main.c), no
+# designers (mdesign.c/vdesign.c) and no runtime DYNALOAD.  The four-drone and
+# Madman oracle access is retained in the test-only harness (the regression
+# reference/candidate builds and the display-free xtank-headless), which keep
+# the whole program set.
+#
+SERVER_ONLY_DEFS=	-DSERVER_ONLY
+
+# The one program the shipped server statically registers (init_prog_descs).
+SERVER_PROGS=	drone.c
+
+# X front-end entry point and the maze/vehicle designers.
+SERVER_ONLY_EXCLUDE=	main.c mdesign.c vdesign.c
+
+# Bot programs kept for the oracle harness only.
+SERVER_NONDRONE_PROGS=	Bootlegger.c Dio.c Diophantine.c Flipper.c eliza.c \
+	gnat.c mmtf.c rdfbot.c spot.c tagman.c
+
+# Reusable display-free simulation core shared by the server binary.
+SERVER_CORE_SRCS= $(filter-out $(X_SRCS) $(SERVER_ONLY_EXCLUDE) \
+	$(SERVER_NONDRONE_PROGS),$(SRCS))
+
+# Common feature defines with DYNALOAD removed (the server never dlopens).
+SERVER_COMMON_DEFS= $(filter-out -DDYNALOAD,$(COMMON_DEFS))
