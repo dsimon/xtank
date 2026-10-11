@@ -24,6 +24,43 @@ struct ClientPlatform {
 	SDL_Renderer *renderer;
 };
 
+/*
+ * Physical SDL scancode -> neutral client control.  Keeping this table here
+ * (the only SDL translation unit) guarantees that SDL scancodes never appear in
+ * Client/input.c or reach the engine: input.c works only in XtkControl and wire
+ * ops, the server maps wire ops to IntentOp.
+ */
+XtkControl xtk_sdl_scancode_to_control(int scancode)
+{
+	switch (scancode) {
+	case SDL_SCANCODE_SPACE:	return XTK_CTL_FIRE;
+	case SDL_SCANCODE_LCTRL:
+	case SDL_SCANCODE_RCTRL:	return XTK_CTL_FIRE_HOLD;
+	case SDL_SCANCODE_W:
+	case SDL_SCANCODE_UP:		return XTK_CTL_DRIVE_FWD;
+	case SDL_SCANCODE_S:
+	case SDL_SCANCODE_DOWN:		return XTK_CTL_DRIVE_BACK;
+	case SDL_SCANCODE_P:		return XTK_CTL_PAUSE;
+	case SDL_SCANCODE_Q:		return XTK_CTL_QUIT;
+	case SDL_SCANCODE_1:		return XTK_CTL_WEAPON_1;
+	case SDL_SCANCODE_2:		return XTK_CTL_WEAPON_2;
+	case SDL_SCANCODE_3:		return XTK_CTL_WEAPON_3;
+	case SDL_SCANCODE_4:		return XTK_CTL_WEAPON_4;
+	case SDL_SCANCODE_5:		return XTK_CTL_WEAPON_5;
+	case SDL_SCANCODE_6:		return XTK_CTL_WEAPON_6;
+	default:			return XTK_CTL_NONE;
+	}
+}
+
+XtkControl xtk_sdl_button_to_control(int button)
+{
+	switch (button) {
+	case SDL_BUTTON_LEFT:	return XTK_CTL_FIRE;
+	case SDL_BUTTON_RIGHT:	return XTK_CTL_FIRE_HOLD;
+	default:		return XTK_CTL_NONE;
+	}
+}
+
 int xtk_dpi_logical_to_drawable(int logical, float scale)
 {
 	if (scale <= 0.0f) {
@@ -150,13 +187,21 @@ int client_platform_pump(ClientPlatform *p, ClientEvents *ev)
 		case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
 			ev->resized++;
 			break;
+		case SDL_EVENT_WINDOW_FOCUS_GAINED:
+			ev->focus_gained++;
+			break;
+		case SDL_EVENT_WINDOW_FOCUS_LOST:
+			ev->focus_lost++;
+			break;
 		case SDL_EVENT_KEY_DOWN:
 			ev->key_down++;
 			ev->last_key = (int)e.key.key;
+			ev->last_scancode = (int)e.key.scancode;
 			break;
 		case SDL_EVENT_KEY_UP:
 			ev->key_up++;
 			ev->last_key = (int)e.key.key;
+			ev->last_scancode = (int)e.key.scancode;
 			break;
 		case SDL_EVENT_MOUSE_MOTION:
 			ev->mouse_motion++;
@@ -258,6 +303,16 @@ void client_platform_inject_quit(ClientPlatform *p)
 	(void)p;
 	SDL_zero(e);
 	e.type = SDL_EVENT_QUIT;
+	SDL_PushEvent(&e);
+}
+
+void client_platform_inject_focus(ClientPlatform *p, int focused)
+{
+	SDL_Event e;
+	SDL_zero(e);
+	e.type = focused ? SDL_EVENT_WINDOW_FOCUS_GAINED
+			 : SDL_EVENT_WINDOW_FOCUS_LOST;
+	e.window.windowID = SDL_GetWindowID(p->window);
 	SDL_PushEvent(&e);
 }
 
