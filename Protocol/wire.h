@@ -14,6 +14,7 @@
 #define XTK_PROTOCOL_WIRE_H
 
 #include <stdint.h>
+#include <stddef.h>
 #include "limits.h"
 
 /* ---- Envelope -------------------------------------------------------- */
@@ -159,5 +160,339 @@ enum XtkErrorCode {
     XTK_ERR_TIMEOUT          = 0x001D,
     XTK_ERR_UNAUTHORIZED_OP  = 0x001E
 };
+
+/* ======================================================================
+ * Codec API (P2.3)
+ *
+ * The codec is a bounded, allocation-free serializer for the frozen v1
+ * schema.  It uses only Protocol/ headers and never touches the engine,
+ * SDL, ENet or the simulation.  All integers/floats are written explicitly
+ * in network byte order (big-endian); no native struct is copied and the
+ * host's byte order cannot change a single output octet.
+ * ====================================================================== */
+
+/* ---- Primitive big-endian serialization ------------------------------ */
+
+/* Finite test for an IEEE-754 binary64 value that needs no <math.h> and does
+ * not depend on the FP exception mode.  NaN is the only value unequal to
+ * itself; +-Inf fall outside the finite magnitude range. */
+static inline int xtk_finite_f64(double v)
+{
+    return (v == v) && v <= 1.7976931348623157e308 &&
+           v >= -1.7976931348623157e308;
+}
+
+/* Store writes exactly N octets and imposes no alignment requirement; Load
+ * reads exactly N octets.  xtk_load_f64 returns 1 and writes *out for a
+ * finite value, 0 for NaN/+-Inf. */
+void     xtk_store_u16(uint8_t *p, uint16_t v);
+void     xtk_store_u32(uint8_t *p, uint32_t v);
+void     xtk_store_i32(uint8_t *p, int32_t v);
+void     xtk_store_f64(uint8_t *p, double v);
+uint16_t xtk_load_u16(const uint8_t *p);
+uint32_t xtk_load_u32(const uint8_t *p);
+int32_t  xtk_load_i32(const uint8_t *p);
+int      xtk_load_f64(const uint8_t *p, double *out);
+
+/* Canonical transport channel for a message type (0/1/2), or 0xFF if the
+ * type is not part of protocol v1.  Used by encode to assign the channel and
+ * by decode to reject a message delivered on the wrong channel. */
+uint8_t  xtk_next_channel(uint8_t message_type);
+
+/* ---- Decoded message shapes (host-native; never transmitted raw) ----- */
+
+typedef struct {
+    uint32_t magic;
+    uint8_t  version_major;
+    uint8_t  version_minor;
+    uint8_t  message_type;
+    uint8_t  channel;
+    uint32_t payload_length;
+    uint32_t session_id;
+    uint32_t epoch;
+    uint32_t message_sequence;
+    int32_t  tick;
+    uint32_t reserved;
+} XtkEnvelope;
+
+typedef struct { uint32_t nonce; } XtkPing;   /* PING and PONG */
+
+typedef struct {
+    uint32_t client_nonce;
+    uint8_t  proto_major;
+    uint8_t  proto_minor;
+    uint16_t client_build;
+    char     name[XTK_MAX_NAME_BYTES + 1];
+    uint8_t  content_set_digest[XTK_SHA256_BYTES];
+} XtkHello;
+
+typedef struct {
+    uint32_t server_nonce;
+    uint8_t  role;
+    uint8_t  tick_hz;
+    uint8_t  max_players;
+    uint8_t  reserved;
+} XtkWelcome;
+
+typedef struct {
+    uint16_t error_code;
+    uint16_t detail_code;
+    char     text[XTK_MAX_ERROR_TEXT_BYTES + 1];
+} XtkReject;
+
+typedef struct {
+    uint16_t id;
+    uint8_t  kind;
+    char     name[XTK_MAX_NAME_BYTES + 1];
+    uint8_t  source_sha256[XTK_SHA256_BYTES];
+} XtkCatalogEntry;
+
+typedef struct {
+    uint8_t         content_set_digest[XTK_SHA256_BYTES];
+    uint16_t        entry_count;
+    XtkCatalogEntry entry[XTK_MAX_CATALOG_ENTRIES];
+} XtkCatalog;
+
+typedef struct {
+    uint16_t maze_id;
+    uint16_t vehicle_id;
+    uint32_t reserved;
+} XtkConfigSelect;
+
+typedef struct {
+    uint16_t maze_id;
+    uint16_t vehicle_id;
+    uint16_t status;
+    uint16_t error_code;
+} XtkConfigStatus;
+
+typedef struct {
+    uint32_t start_tick;
+    uint16_t maze_id;
+    uint8_t  vehicle_id;
+    uint8_t  reserved;
+} XtkStart;
+
+typedef struct { uint32_t epoch; uint32_t first_tick; } XtkEpochBegin;
+
+typedef struct {
+    uint8_t  slot;
+    uint8_t  generation;
+    uint16_t reserved;
+    uint32_t score;
+    char     name[XTK_MAX_NAME_BYTES + 1];
+} XtkResultEntry;
+
+typedef struct {
+    uint32_t       end_tick;
+    uint8_t        result_kind;
+    uint8_t        winner_slot;
+    uint8_t        vehicle_count;
+    uint8_t        reserved;
+    XtkResultEntry entry[XTK_MAX_PLAYERS];
+} XtkResults;
+
+typedef struct { uint32_t prior_epoch; uint32_t reserved; } XtkReset;
+
+typedef struct {
+    uint32_t event_sequence;
+    uint8_t  event_type;
+    uint8_t  entity_kind;
+    uint16_t entity_id;
+    uint32_t entity_generation;
+    uint32_t aux0;
+    uint32_t aux1;
+    char     text[XTK_MAX_NAME_BYTES + 1];
+} XtkEvent;
+
+typedef struct {
+    uint32_t command_id;
+    uint32_t assigned_tick;
+    uint8_t  status;
+    uint8_t  reason;
+    uint16_t reserved;
+} XtkAckEntry;
+
+typedef struct {
+    uint16_t     count;
+    uint16_t     reserved;
+    XtkAckEntry  entry[XTK_ACK_MAX_ENTRIES];
+} XtkCmdAck;
+
+typedef struct {
+    uint16_t error_code;
+    uint16_t detail;
+    uint32_t offending_sequence;
+    uint16_t offending_type;
+    uint16_t reserved;
+} XtkProtocolError;
+
+typedef struct {
+    uint32_t command_id;
+    uint32_t tick_hint;
+    uint8_t  op;
+    uint8_t  flags;
+    uint16_t reserved;
+    double   a;
+    double   b;
+} XtkCommand;
+
+typedef struct {
+    uint32_t   last_observed_server_tick;
+    uint16_t   command_count;
+    uint16_t   reserved;
+    XtkCommand command[XTK_MAX_INPUT_COMMANDS_PER_BATCH];
+} XtkReliableCmd;
+
+typedef struct {
+    uint32_t   packet_sequence;
+    uint32_t   last_observed_server_tick;
+    uint16_t   command_count;
+    uint16_t   reserved;
+    XtkCommand command[XTK_MAX_INPUT_COMMANDS_PER_BATCH];
+} XtkInputBatch;
+
+typedef struct {
+    uint8_t  slot;
+    uint8_t  generation;
+    uint16_t lifecycle_flags;
+    uint16_t armor[XTK_ARMOR_SIDES];
+    uint16_t fuel;
+    uint16_t heat;
+    uint32_t score;
+    uint16_t ammo[XTK_MAX_WEAPONS];
+    uint8_t  weapon_enabled_bitmap;
+    uint8_t  weapon_count;
+    uint16_t reload[XTK_MAX_WEAPONS];
+    uint8_t  reserved[2];
+} XtkSelfState;
+
+typedef struct {
+    uint8_t  slot;
+    uint8_t  generation;
+    uint8_t  kind;
+    uint8_t  flags;
+    double   x;
+    double   y;
+    double   body_angle;
+    double   turret_angle;
+    uint16_t body_picture;
+    uint16_t turret_picture;
+    uint8_t  reserved[4];
+} XtkVehicleView;
+
+typedef struct {
+    uint16_t id;
+    uint16_t flags;
+    double   x;
+    double   y;
+    double   heading;
+    uint8_t  owner_slot;
+    uint8_t  owner_generation;
+    uint8_t  kind;
+    uint8_t  reserved;
+} XtkBulletView;
+
+typedef struct {
+    uint16_t id;
+    uint8_t  kind;
+    uint8_t  flags;
+    double   x;
+    double   y;
+    uint8_t  reserved[4];
+} XtkExplosionView;
+
+typedef struct {
+    uint8_t grid_x;
+    uint8_t grid_y;
+    uint8_t flags;
+    uint8_t type;
+} XtkMapCell;
+
+typedef struct {
+    uint8_t  kind;
+    uint8_t  id;
+    uint16_t reserved;
+    double   x;
+    double   y;
+    uint8_t  reserved2[4];
+} XtkLandmarkView;
+
+typedef struct {
+    double   x;
+    double   y;
+    uint8_t  age;
+    uint8_t  classification;
+    uint16_t reserved;
+} XtkRadarBlip;
+
+typedef struct {
+    uint32_t snapshot_sequence;
+    uint32_t server_tick;
+    uint16_t flags;
+    uint8_t  own_slot;
+    uint8_t  own_generation;
+    uint16_t vehicle_count;
+    uint16_t bullet_count;
+    uint16_t explosion_count;
+    uint16_t map_cell_count;
+    uint16_t landmark_count;
+    uint8_t  radar_blip_count;
+    uint8_t  weapon_count;
+    uint32_t map_revision;
+    XtkSelfState      self;
+    XtkVehicleView    vehicle[XTK_MAX_VEHICLES];
+    XtkBulletView     bullet[XTK_MAX_BULLETS];
+    XtkExplosionView  explosion[XTK_MAX_EXPLOSIONS];
+    XtkMapCell        cell[XTK_MAX_MAP_CELLS];
+    XtkLandmarkView   landmark[XTK_MAX_LANDMARKS];
+    XtkRadarBlip      radar[XTK_MAX_RADAR_BLIPS];
+} XtkViewSnapshot;
+
+/* One decoded message: the envelope plus a typed body selected by
+ * env.message_type.  The body is stored inline (no pointer, no allocation);
+ * the fixed array bounds make the struct a little under 32 KiB. */
+typedef union {
+    XtkPing          ping;
+    XtkHello         hello;
+    XtkWelcome       welcome;
+    XtkReject        reject;
+    XtkCatalog       catalog;
+    XtkConfigSelect  config_select;
+    XtkConfigStatus  config_status;
+    XtkStart         start;
+    XtkEpochBegin    epoch_begin;
+    XtkResults       results;
+    XtkReset         reset;
+    XtkEvent         event;
+    XtkCmdAck        cmd_ack;
+    XtkProtocolError protocol_error;
+    XtkReliableCmd   reliable_cmd;
+    XtkInputBatch    input_batch;
+    XtkViewSnapshot  view_snapshot;
+} XtkMessageBody;
+
+typedef struct {
+    XtkEnvelope    env;
+    XtkMessageBody body;
+} XtkMessage;
+
+/* ---- Whole-message codec -------------------------------------------- */
+
+/* Encode a complete message (envelope + payload) into out[0..cap).  The
+ * envelope magic/version/channel/reserved are assigned by the codec; the
+ * payload_length is computed.  msg->env.message_type selects the body.
+ * Returns XTK_ERR_NONE and sets *out_len, or an XtkErrorCode.  On error the
+ * buffer holds no usable message.  A caller encoding the largest authorized
+ * view must provide at least XTK_MAX_MESSAGE_BYTES. */
+int xtk_encode(uint8_t *out, size_t cap, const XtkMessage *msg, size_t *out_len);
+
+/* Decode and fully validate one complete message of exactly len octets.
+ * Rejects bad magic, wrong major/minor version, a payload length over bound
+ * or inconsistent with len, a wrong/unknown channel, an unknown message
+ * type, a non-zero reserved field, a negative tick, over-bound counts,
+ * truncated or trailing octets, malformed string fields and non-finite f64
+ * values.  Never allocates.  Returns XTK_ERR_NONE on success. */
+int xtk_decode(const uint8_t *buf, size_t len, XtkMessage *msg);
 
 #endif /* XTK_PROTOCOL_WIRE_H */
