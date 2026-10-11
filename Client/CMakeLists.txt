@@ -13,6 +13,7 @@ add_executable(xtank-client
     camera.c
     model.c
     world_render.c
+    input.c
     "${CMAKE_SOURCE_DIR}/Protocol/encode.c"
     "${CMAKE_SOURCE_DIR}/Protocol/decode.c"
     "${CMAKE_SOURCE_DIR}/Protocol/content-manifest.c"
