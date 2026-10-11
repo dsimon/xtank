@@ -1,0 +1,17 @@
+# P1.14 frozen supplied-content manifest.
+#
+# The release/MVP content set (PHASE0-BRIEF section 3) is exactly these two
+# mazes and the Vanguard vehicle, taken verbatim from the pinned tree.  They
+# are read-only: this manifest detects any content conversion or drift.  The
+# assets are supplied by path and must load with DISPLAY, XTANK_DIR and HOME
+# unset, without a directory list and without a random-maze fallback.
+#
+# pin 14e6d42efdc0318fbf37717b21cc9f6027dc7e9f (assets unchanged on the
+# windows-phase1 branch; verified against the frozen reference snapshot).
+#
+# Regenerate deliberately (review the diff first) with:
+#   XTANK_P1_REGEN_CONTENT_GOLDEN=1 bash Tests/phase1/content.sh
+pin 14e6d42efdc0318fbf37717b21cc9f6027dc7e9f
+d384f05cca5ac29e19b35f7605e9b1c31c2db6038a82020d250bbae1bce499e2  Mazes/combat1.m
+288d69fa0e62853b4ae7bfc3f74c38c74e08e6ad9e06e645ae214d9c3d37e35e  Mazes/Arena.m
+04dc0e299b9dad4a13ca0dcea53001c94cc3209036b6d4404bd3f6a53049cf11  Vehicles/Vanguard.V

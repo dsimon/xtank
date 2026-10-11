@@ -45,8 +45,19 @@
 
 #include "tanktypes.h"
 #include "tanklimits.h"
+#include "team.h"
+#include "settings.h"
+#include "maze.h"
+#include "vdesc.h"
 
 #define SERVER_MAX_PLAYERS	MAX_TERMINALS
+
+/*
+ * Approved release/MVP content and match limits (PHASE0-BRIEF section 3):
+ * Combat, individual winning score 1000, at most four vehicles, all
+ * players/bots in a Vanguard, and the approved special preset.
+ */
+#define SERVER_RELEASE_MAX_VEHICLES	4
 
 /*
  * One explicit player binding: a player name attached to a terminal slot.
@@ -68,6 +79,7 @@ typedef struct {
 	unsigned int seed;
 	int seed_set;
 	int tick_hz;
+	int max_vehicles;	/* <= 0 selects the legacy MAX_VEHICLES limit */
 } ServerConfig;
 
 /* The single server configuration used by this process. */
@@ -75,6 +87,17 @@ ServerConfig *server_config(void);
 void server_config_init(ServerConfig *cfg);
 int server_config_add_player(ServerConfig *cfg, const char *name);
 const char *server_player_name(int terminal_index);
+
+/*
+ * Approved release/MVP configuration (P1.14, PHASE0-BRIEF section 3).
+ * server_release_settings() starts from init_settings() and applies only the
+ * approved overrides: Combat free-for-all (team scoring off), respawn on,
+ * bots may win, individual winning score 1000 and 15 simulation ticks/s.
+ * server_config_release() additionally pins the server config fields (15 Hz
+ * and at most SERVER_RELEASE_MAX_VEHICLES vehicles).
+ */
+void server_release_settings(Settings *s);
+void server_config_release(ServerConfig *cfg);
 
 /*
  * Explicit seed source (P1.8).  Reads XTANK_SEED into cfg before the RNG is
@@ -95,6 +118,12 @@ int server_match_init(void);
 int server_step(void);
 void server_match_reset(void);
 void server_destroy(void);
+
+/*
+ * Display-free match result (P1.14): finalize/report the result and reset
+ * per-match scores with no graphical stats wait or event loop.
+ */
+int game_results(int status);
 
 /* Server-owned simulation state. */
 int server_frame(void);
@@ -132,5 +161,36 @@ int server_consume_intents(int tick);
 /* Lifecycle bookkeeping used by the P1.6 lifecycle oracle only. */
 int server_lifecycle_active(void);
 int server_lifecycle_continue(void);
+
+/*
+ * Explicit asset root and list-independent content loading (P1.14).
+ *
+ * content_set_root() installs an explicit asset root and derives the
+ * Vehicles/Mazes/Programs/Src-Include directories beneath it.  It consults
+ * no environment variable, opens no display and returns 0 on success or -1
+ * (with content_last_error()) when the root is missing, empty or not a
+ * directory.
+ *
+ * content_load_maze()/content_load_vehicle() load a single named asset from
+ * that root by explicit path.  They never read the directory list and never
+ * fall back to a random maze; a missing or malformed asset returns a DESC_*
+ * code and a human-readable reason.  content_load_settings() parses a
+ * settings file the same way (returning 0 on success, -1 on failure).
+ */
+int content_set_root(const char *root);
+const char *content_root(void);
+int content_load_maze(Mdesc *d, const char *name);
+int content_load_vehicle(Vdesc *d, const char *name);
+int content_load_settings(const char *path);
+const char *content_last_error(void);
+
+/*
+ * Test-only content/config self-check (P1.14).  Runs from get_environment()
+ * when XTANK_CONTENT_CHECK is set, loads the supplied mazes and Vanguard
+ * through the explicit loaders and prints the release configuration; it
+ * exits the process and never returns.  A normal front-end or server run
+ * never sets XTANK_CONTENT_CHECK.
+ */
+void content_check_run(void);
 
 #endif /* _SERVER_H_ */

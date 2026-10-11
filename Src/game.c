@@ -490,6 +490,42 @@ race_rules(Boolean init)
   (display_mesg1(ANIM_WIN,str,x,y,M_FONT,color))
 
 /*
+** Non-graphical match-result finalization (P1.14): print the final scores
+** through the plain, non-screen path when requested, and reset the per-match
+** scores.  Shared by the interactive X stats screen and the display-free
+** server so that the score calculation/results never depend on the graphical
+** stats wait.
+*/
+static void
+game_finalize_scores(int status)
+{
+	if (command_options.PrintScores) {
+		display_game_stats_to_current(status, -1);
+	}
+	if (settings.si.game != ULTIMATE_GAME) {
+		int j;
+
+		for (j = 0; j < num_veh; j++) {
+			Vehicle *v = &actual_vehicles[j];
+
+			v->owner->score = 0;
+		}
+	}
+}
+
+/*
+** Display-free match result (P1.14).  Reports the result with no graphical
+** wait and returns the legacy auto-exit decision, so a headless/server entry
+** can finish a match without a display or an event loop.
+*/
+int
+game_results(int status)
+{
+	game_finalize_scores(status);
+	return GAME_QUIT;
+}
+
+/*
 ** Displays the current state of the game, who scored, and the current score.
 */
 int
@@ -554,18 +590,7 @@ display_game_stats(int status)
 		while (TRUE);
 	}
 
-	if (command_options.PrintScores) {
-		display_game_stats_to_current(status, -1);
-	}
-	if (settings.si.game != ULTIMATE_GAME) {
-		int j;
-
-		for (j = 0; j < num_veh; j++) {
-			Vehicle *v = &actual_vehicles[j];
-
-			v->owner->score = 0;
-		}
-	}
+	game_finalize_scores(status);
 	return ((reply == 'Q') ? GAME_QUIT : GAME_RESET);
 }
 

@@ -50,6 +50,14 @@ extern Settings settings;
 extern int num_terminals;
 extern Terminal *terminal[];
 
+/*
+ * P1.14: a maze named by a settings file but absent from the directory list
+ * is a hard error, never a silent random maze.  The explicit content loader
+ * (Src/file.c:content_load_maze) opens an arbitrary supplied maze by path.
+ */
+static int cv_maze_failed = 0;
+static char cv_maze_missing[128];
+
 /* function prototypes */
 char *yval(void);
 char *strtoke(char *in, char *sep);
@@ -223,7 +231,6 @@ cv_maze(char *val, Mdesc **maze)
 	extern int num_mdescs;
 	extern Mdesc *mdesc;
 
-	/* set to the random maze for now */
 	*maze = (Mdesc *) NULL;
 
 	/* need to search the mdesc[] to find the correct maze */
@@ -239,9 +246,16 @@ cv_maze(char *val, Mdesc **maze)
 		}
 	}
 
+	/*
+	 * P1.14: never substitute a random maze for an unknown name.  Record
+	 * the failure so load_settings() reports it and fails; an unlisted but
+	 * supplied maze is loaded by explicit path through content_load_maze().
+	 */
 	if (*maze == (Mdesc *) NULL)
 	{
-		fprintf(stderr, "Yo butthead!  Using the RANDOM maze.\n");
+		cv_maze_failed = 1;
+		strncpy(cv_maze_missing, val, sizeof(cv_maze_missing) - 1);
+		cv_maze_missing[sizeof(cv_maze_missing) - 1] = '\0';
 	}
 }
 
@@ -324,6 +338,9 @@ load_settings(char *pcFileName)
 		force_states[i] = INT_FORCE_DONT;
 	}
 
+	cv_maze_failed = 0;
+	cv_maze_missing[0] = '\0';
+
 	if (bCalled)
 	{
 		yyrestart(fp);
@@ -335,6 +352,13 @@ load_settings(char *pcFileName)
 		yylex();
 
 		bCalled = TRUE;
+	}
+
+	if (cv_maze_failed) {
+		fprintf(stderr, "xtank: unknown maze '%s' (not in the maze list)\n",
+				cv_maze_missing);
+		fclose(fp);
+		return (0);
 	}
 
 	fclose(fp);

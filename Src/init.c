@@ -29,6 +29,7 @@
 #include "vstructs.h"
 #include "bullet.h"
 #include "terminal.h"
+#include "server.h"
 #include "proto.h"
 
 extern Weapon_stat weapon_stat[];
@@ -89,6 +90,43 @@ init_settings(void)
 	};
 
 	settings = initial_settings;
+}
+
+/*
+** Approved release/MVP match configuration (P1.14, PHASE0-BRIEF section 3).
+**
+** Starts from the init_settings() defaults and applies ONLY the approved
+** overrides: Combat free-for-all (team scoring off), respawn on, bots may
+** win, individual winning score 1000 and 15 ticks/s.  Every other setting is
+** left at its init_settings() default; no gameplay rule changes here.
+*/
+void
+server_release_settings(Settings *s)
+{
+	if (s == NULL)
+		s = &settings;
+
+	init_settings();		/* start from the approved defaults */
+	*s = settings;
+
+	s->game_speed = 15;		/* fixed 15 Hz */
+	s->si.game = COMBAT_GAME;	/* Combat */
+	s->si.team_score = FALSE;	/* free-for-all */
+	s->si.restart = TRUE;		/* respawn enabled */
+	s->robots_dont_win = FALSE;	/* bots may win */
+	s->si.winning_score = 1000;	/* individual winning score */
+}
+
+/*
+** Release server config: 15 Hz, at most SERVER_RELEASE_MAX_VEHICLES vehicles.
+*/
+void
+server_config_release(ServerConfig *cfg)
+{
+	if (cfg == NULL)
+		return;
+	cfg->tick_hz = 15;
+	cfg->max_vehicles = SERVER_RELEASE_MAX_VEHICLES;
 }
 
 void

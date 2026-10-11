@@ -46,6 +46,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdarg.h>
 
 #include <sys/stat.h>	/* for chmod() */
 
@@ -60,6 +61,7 @@
 #include "terminal.h"
 #include "globals.h"
 #include "vstructs.h"
+#include "server.h"
 #include "proto.h"
 
 char pathname[MAXPATHLEN];
@@ -187,8 +189,11 @@ load_desc_lists(void)
 	(void) strcpy(filename, "XVDIR:list");
 #endif /* AMIGA */
 
+#ifndef NULL_BACKEND
+	/* The display-free server has no progress window (P1.14). */
 	draw_text_rc(ANIM_WIN, 0, 2, "Reading vehicle list...", M_FONT, WHITE);
 	sync_output(TRUE);
+#endif
 	if ((file = fopen(filename, "r")) != NULL) {
 		while (fscanf(file, "%s", name) != EOF)
 			make_vdesc(name, &num);
@@ -214,8 +219,11 @@ load_desc_lists(void)
 	(void) strcpy(filename, "XMDIR:list");
 #endif /* AMIGA */
 
+#ifndef NULL_BACKEND
+	/* The display-free server has no progress window (P1.14). */
 	draw_text_rc(ANIM_WIN, 0, 3, "Reading maze list...", M_FONT, WHITE);
 	sync_output(TRUE);
+#endif
 	if ((file = fopen(filename, "r")) != NULL) {
 		while (fscanf(file, "%s", name) != EOF)
 			make_mdesc(name, &num);
@@ -725,24 +733,279 @@ get_environment(void)
 	/* Read in variables, providing appropriate defaults if not found */
 	strcpy(username, (p = getenv("USER")) ? p :
 		   ((p = getenv("LOGNAME")) ? p : "user"));
-	strcpy(pathname, (p = getenv("XTANK_DIR")) ? p : "/usr/local/share/XTank");
-	strcpy(vehiclesdir, (p = getenv("XTANK_VEHICLES")) ? p : "Vehicles");
-	strcpy(mazesdir, (p = getenv("XTANK_MAZES")) ? p : "Mazes");
-	strcpy(programsdir, (p = getenv("XTANK_PROGRAMS")) ? p : "Programs");
-	if ((p = getenv("XTANK_HEADERS")) != NULL) {
-		strcpy(headersdir, p);
+
+	/*
+	 * P1.14: an explicit asset root (XTANK_ASSET_ROOT) takes precedence over
+	 * the legacy XTANK_DIR lookup.  It is resolved exactly once, here; the
+	 * content loaders themselves never consult the environment.  When
+	 * neither variable is set the historical default is retained so the X
+	 * front-end is unchanged.
+	 */
+	if ((p = getenv("XTANK_ASSET_ROOT")) != NULL) {
+		if (content_set_root(p) != 0) {
+			fprintf(stderr, "xtank: %s\n", content_last_error());
+			exit(2);
+		}
 	} else {
-		strcpy(headersdir, pathname);
-		strcat(headersdir, "/Src/Include");
+		strcpy(pathname, (p = getenv("XTANK_DIR")) ? p
+			   : "/usr/local/share/XTank");
+		strcpy(vehiclesdir, (p = getenv("XTANK_VEHICLES")) ? p : "Vehicles");
+		strcpy(mazesdir, (p = getenv("XTANK_MAZES")) ? p : "Mazes");
+		strcpy(programsdir, (p = getenv("XTANK_PROGRAMS")) ? p : "Programs");
+		if ((p = getenv("XTANK_HEADERS")) != NULL) {
+			strcpy(headersdir, p);
+		} else {
+			strcpy(headersdir, pathname);
+			strcat(headersdir, "/Src/Include");
+		}
 	}
 	strcpy(displayname, (p = getenv("DISPLAY")) ? p : "unix:0.0");
 
 #ifdef NEED_AUX_FONT
 	strcpy(fontdir, (p = getenv("FONT_DIR")) ? p : "Fonts");
 #endif
+
+	/* Test-only content/config self-check; never set in normal runs. */
+	if (getenv("XTANK_CONTENT_CHECK") != NULL)
+		content_check_run();
 }
 
 #endif /* UNIX */
+
+/* ------------------------------------------------------------------ */
+/* P1.14 -- explicit asset root and display-free content loading       */
+/* ------------------------------------------------------------------ */
+
+static char content_error[MAXPATHLEN + 256];
+static char content_root_dir[MAXPATHLEN];
+
+const char *
+content_last_error(void)
+{
+	return content_error;
+}
+
+const char *
+content_root(void)
+{
+	return content_root_dir;
+}
+
+static int
+content_fail(const char *fmt, ...)
+{
+	va_list ap;
+
+	va_start(ap, fmt);
+	(void) vsnprintf(content_error, sizeof(content_error), fmt, ap);
+	va_end(ap);
+	return -1;
+}
+
+/*
+** Installs an explicit asset root and derives the Vehicles/Mazes/Programs
+** and Src/Include directories beneath it.  Reads no environment variable,
+** opens no display and reports a precise reason on failure.
+*/
+int
+content_set_root(const char *root)
+{
+	struct stat st;
+
+	if (root == NULL || *root == '\0') {
+		(void) content_fail("empty asset root");
+		return -1;
+	}
+	if (stat(root, &st) != 0 || !S_ISDIR(st.st_mode)) {
+		(void) content_fail("asset root '%s' is not a directory", root);
+		return -1;
+	}
+	if (strlen(root) >= sizeof(pathname)) {
+		(void) content_fail("asset root '%s' is too long", root);
+		return -1;
+	}
+
+	strcpy(pathname, root);
+	strcpy(vehiclesdir, "Vehicles");
+	strcpy(mazesdir, "Mazes");
+	strcpy(programsdir, "Programs");
+	(void) snprintf(headersdir, sizeof(headersdir), "%s/Src/Include", root);
+	(void) strncpy(content_root_dir, root, sizeof(content_root_dir) - 1);
+	content_root_dir[sizeof(content_root_dir) - 1] = '\0';
+	content_error[0] = '\0';
+	return 0;
+}
+
+/*
+** Loads a single named maze by explicit path under the installed root.  It
+** does not consult the directory list and never substitutes a random maze;
+** a missing or malformed file returns a DESC_* code with a reason.
+*/
+int
+content_load_maze(Mdesc *d, const char *name)
+{
+	int rc;
+
+	if (d == NULL || name == NULL || *name == '\0') {
+		(void) content_fail("maze name required");
+		return DESC_BAD_FORMAT;
+	}
+	rc = load_mdesc(d, (char *) name);
+	if (rc != DESC_LOADED)
+		(void) content_fail("maze '%s' not found under %s/%s (rc=%d)",
+							name, pathname, mazesdir, rc);
+	return rc;
+}
+
+/*
+** Loads a single named vehicle by explicit path under the installed root.
+*/
+int
+content_load_vehicle(Vdesc *d, const char *name)
+{
+	int rc;
+
+	if (d == NULL || name == NULL || *name == '\0') {
+		(void) content_fail("vehicle name required");
+		return DESC_BAD_FORMAT;
+	}
+	rc = load_vdesc(d, (char *) name);
+	if (rc != DESC_LOADED)
+		(void) content_fail("vehicle '%s' not found under %s/%s (rc=%d)",
+							name, pathname, vehiclesdir, rc);
+	return rc;
+}
+
+/*
+** Parses a settings file with explicit error reporting.
+*/
+int
+content_load_settings(const char *path)
+{
+	if (path == NULL || *path == '\0') {
+		(void) content_fail("settings path required");
+		return -1;
+	}
+	if (load_settings((char *) path) == 0) {
+		(void) content_fail("settings file '%s' could not be loaded", path);
+		return -1;
+	}
+	content_error[0] = '\0';
+	return 0;
+}
+
+static void
+content_print_settings(const char *tag, Settings *s)
+{
+	printf("%s game_speed=%d\n", tag, s->game_speed);
+	printf("%s maze_density=%d\n", tag, s->maze_density);
+	printf("%s point_bullets=%d\n", tag, (int) s->point_bullets);
+	printf("%s commentator=%d\n", tag, (int) s->commentator);
+	printf("%s robots_dont_win=%d\n", tag, (int) s->robots_dont_win);
+	printf("%s max_armor_scale=%d\n", tag, (int) s->max_armor_scale);
+	printf("%s difficulty=%d\n", tag, s->difficulty);
+	printf("%s si_game=%d\n", tag, (int) s->si.game);
+	printf("%s si_ricochet=%d\n", tag, (int) s->si.ricochet);
+	printf("%s si_rel_shoot=%d\n", tag, (int) s->si.rel_shoot);
+	printf("%s si_no_wear=%d\n", tag, (int) s->si.no_wear);
+	printf("%s si_restart=%d\n", tag, (int) s->si.restart);
+	printf("%s si_full_map=%d\n", tag, (int) s->si.full_map);
+	printf("%s si_pay_to_play=%d\n", tag, (int) s->si.pay_to_play);
+	printf("%s si_no_nametags=%d\n", tag, (int) s->si.no_nametags);
+	printf("%s si_team_score=%d\n", tag, (int) s->si.team_score);
+	printf("%s si_player_teleport=%d\n", tag, (int) s->si.player_teleport);
+	printf("%s si_disc_teleport=%d\n", tag, (int) s->si.disc_teleport);
+	printf("%s si_teleport_from_team=%d\n", tag, (int) s->si.teleport_from_team);
+	printf("%s si_teleport_from_neutral=%d\n", tag, (int) s->si.teleport_from_neutral);
+	printf("%s si_teleport_to_team=%d\n", tag, (int) s->si.teleport_to_team);
+	printf("%s si_teleport_to_neutral=%d\n", tag, (int) s->si.teleport_to_neutral);
+	printf("%s si_teleport_any_to_any=%d\n", tag, (int) s->si.teleport_any_to_any);
+	printf("%s si_war_goals_only=%d\n", tag, (int) s->si.war_goals_only);
+	printf("%s si_relative_disc=%d\n", tag, (int) s->si.relative_disc);
+	printf("%s si_ultimate_own_goal=%d\n", tag, (int) s->si.ultimate_own_goal);
+	printf("%s si_winning_score=%d\n", tag, s->si.winning_score);
+	printf("%s si_takeover_time=%d\n", tag, s->si.takeover_time);
+	printf("%s si_outpost_strength=%d\n", tag, s->si.outpost_strength);
+	printf("%s si_shocker_walls=%d\n", tag, s->si.shocker_walls);
+	printf("%s si_scroll_speed=%.6f\n", tag, s->si.scroll_speed);
+	printf("%s si_slip_friction=%.6f\n", tag, s->si.slip_friction);
+	printf("%s si_normal_friction=%.6f\n", tag, s->si.normal_friction);
+	printf("%s si_disc_friction=%.6f\n", tag, s->si.disc_friction);
+	printf("%s si_disc_speed=%.6f\n", tag, s->si.disc_speed);
+	printf("%s si_disc_damage=%.6f\n", tag, s->si.disc_damage);
+	printf("%s si_disc_heat=%.6f\n", tag, s->si.disc_heat);
+	printf("%s si_box_slowdown=%.6f\n", tag, s->si.box_slowdown);
+	printf("%s si_owner_slowdown=%.6f\n", tag, s->si.owner_slowdown);
+	printf("%s si_num_discs=%d\n", tag, s->si.num_discs);
+}
+
+/*
+** Test-only content/config self-check (P1.14).  Invoked from
+** get_environment() when XTANK_CONTENT_CHECK is set; exits the process.
+*/
+void
+content_check_run(void)
+{
+	Mdesc m;
+	Vdesc v;
+	Settings def, rel;
+	ServerConfig cfg;
+	char force[MAX_SPECIALS];
+	int rc, i, fail = 0;
+
+	rc = content_load_maze(&m, "combat1");
+	printf("CONTENT-MAZE combat1 rc=%d name=%s type=%d\n", rc,
+		   (rc == DESC_LOADED && m.name) ? m.name : "-",
+		   (rc == DESC_LOADED) ? (int) m.type : -1);
+	if (rc != DESC_LOADED) {
+		printf("CONTENT-ERROR %s\n", content_last_error());
+		fail = 1;
+	}
+
+	rc = content_load_maze(&m, "Arena");
+	printf("CONTENT-MAZE Arena rc=%d name=%s type=%d\n", rc,
+		   (rc == DESC_LOADED && m.name) ? m.name : "-",
+		   (rc == DESC_LOADED) ? (int) m.type : -1);
+	if (rc != DESC_LOADED) {
+		printf("CONTENT-ERROR %s\n", content_last_error());
+		fail = 1;
+	}
+
+	rc = content_load_vehicle(&v, "Vanguard");
+	printf("CONTENT-VEHICLE Vanguard rc=%d name=%s body=%d weapons=%d specials=0x%x\n",
+		   rc, (rc == DESC_LOADED) ? v.name : "-",
+		   (rc == DESC_LOADED) ? v.body : -1,
+		   (rc == DESC_LOADED) ? v.num_weapons : -1,
+		   (rc == DESC_LOADED) ? (unsigned) v.specials : 0);
+	if (rc != DESC_LOADED) {
+		printf("CONTENT-ERROR %s\n", content_last_error());
+		fail = 1;
+	}
+
+	/* Release config derived from init_settings() defaults. */
+	init_settings();
+	def = settings;
+	server_release_settings(&settings);
+	rel = settings;
+	content_print_settings("SETDEF", &def);
+	content_print_settings("SETREL", &rel);
+
+	server_config_init(&cfg);
+	server_config_release(&cfg);
+	printf("CONTENT-CONFIG max_vehicles=%d tick_hz=%d release_max=%d\n",
+		   cfg.max_vehicles, cfg.tick_hz, SERVER_RELEASE_MAX_VEHICLES);
+
+	/* Approved special preset. */
+	for (i = 0; i < MAX_SPECIALS; i++)
+		force[i] = INT_FORCE_DONT;
+	special_apply_mvp_preset(force);
+	for (i = 0; i < MAX_SPECIALS; i++)
+		printf("PRESET %d=%d\n", i, (int) force[i]);
+
+	printf("%s\n", fail ? "CONTENT-FAIL" : "CONTENT-OK");
+	(void) fflush(stdout);
+	exit(fail ? 1 : 0);
+}
 
 #ifdef UNIX
 #include <sys/types.h>
