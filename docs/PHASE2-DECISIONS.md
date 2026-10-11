@@ -25,3 +25,7 @@ Full authorized snapshots at 15 Hz, one-tick (66.7 ms) interpolation buffer, 60 
 ## D2-F: Session/view minimum — APPROVED (provisional): one-peer lobby, 2-second solo abort
 
 First peer administers start/reset; server-enforced ownership and knowledge from first snapshot. Two seconds without valid traffic → neutral drive/fire, session abort, cleanup, return to lobby. Owner marked "for now" — revisit if the abort policy needs refinement. Phase 3 retains the full approved remaining-human departure policy.
+
+## Pinned implementation versions (P2.1)
+
+The exact SDL3, ENet and MinGW-w64 build/dependency versions — with download URLs and SHA-256 hashes — frozen for Phase 2 are recorded in `P2.1-REPORT.md`. No dependency substitution is authorized without a new owner decision.
