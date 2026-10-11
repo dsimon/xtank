@@ -27,6 +27,7 @@
 #include <stdio.h>
 
 #include "wire.h"		/* XtkViewSnapshot (portable protocol DTO) */
+#include "camera.h"		/* XtkCamera (P2.11 presentation camera)  */
 
 /* ---- Bundle format -------------------------------------------------- */
 
@@ -165,6 +166,17 @@ struct SDL_Surface;
  */
 int render_frame_surface(const XtkAssets *a, const XtkViewSnapshot *v,
 			 const XtkRenderView *rv, struct SDL_Surface *surf,
+			 char *err, size_t errcap);
+
+/*
+ * P2.11 presentation glue: draw one full frame of an authorized (already
+ * interpolated) snapshot through the fixed camera of Client/camera.h, with the
+ * default presentation colors.  The camera viewport and the 1:1 world scale are
+ * invariant; only the camera centre follows the displayed own pose.  Returns 0,
+ * or -1 with a diagnostic.
+ */
+int world_render_present(const XtkAssets *a, const XtkViewSnapshot *v,
+			 const XtkCamera *cam, struct SDL_Surface *surf,
 			 char *err, size_t errcap);
 
 /* Low-level surface primitives.  DRAW_XOR is a true per-channel XOR, matching
