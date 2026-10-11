@@ -89,6 +89,7 @@ special_mapper(Vehicle *v, char *record, int action)
 		  m->need_redisplay = TRUE;
 		  m->map_invalid = FALSE;
 		  m->num_symbols = 0;
+		  special_stats.mapper_updates++;	/* P1.11 instrumentation */
 
 		  /* Update the marker location */
 		  m->old_marker = m->marker;

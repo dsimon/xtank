@@ -37,6 +37,7 @@
 #include "assert.h"
 #include "proto.h"
 #include "lowlib.h"
+#include "server.h"
 
 extern Terminal *term;
 extern Weapon_stat weapon_stat[];
@@ -504,6 +505,29 @@ expl_area(Bullet *b)	/* Lots-o-changes 2/93 (HAK and MEL) */
 }
 
 /*
+** P1.11 -- the single point at which a special proc is invoked.
+**
+** Model transitions always reach the special.  Draw actions are delivered
+** only while presentation is active; otherwise they are elided, so a
+** display-free server keeps the mapper/radar/etc. knowledge without ever
+** entering a draw callback.  The counters are read-only instrumentation.
+*/
+static SpecialStatus
+special_invoke(Vehicle *v, Special *s, int action)
+{
+	if (SP_ACTION_IS_DRAW(action)) {
+		if (!special_presentation_active()) {
+			special_stats.draw_suppressed++;
+			return s->status;
+		}
+		special_stats.draw_invocations++;
+	} else if (SP_ACTION_IS_MODEL(action)) {
+		special_stats.model_invocations++;
+	}
+	return (*s->proc) (v, s->record, action);
+}
+
+/*
 ** Does the specified action for the specified special in the
 ** specified vehicle.
 */
@@ -562,21 +586,21 @@ do_special(Vehicle *v, SpecialType special_num, int action)
                   if (s->damage_flag == SPDF_break) {
 		      if (s->status == SP_on) {
 			  s->status = SP_off;
-			  (*s->proc) (v, s->record, SP_deactivate);
+			  (void) special_invoke(v, s, SP_deactivate);
                           for (i=0; i<num_terminals; i++)
                               if (terminal[i]->vehicle == v) {
                                   set_video((Video *) terminal[i]->video);
-			          (*s->proc) (v, s->record, SP_erase);
+			          (void) special_invoke(v, s, SP_erase);
                               }
 		      }
 		      s->status = SP_broken;
                   } else if (s->damage_flag == SPDF_fix) {
-		      s->status = (*s->proc) (v, s->record, SP_activate);
+		      s->status = special_invoke(v, s, SP_activate);
 	    	      if (s->status == SP_on)
                               for (i=0; i<num_terminals; i++)
                                   if (terminal[i]->vehicle == v) {
                                       set_video((Video *) terminal[i]->video);
-			              (*s->proc) (v, s->record, SP_draw);
+			              (void) special_invoke(v, s, SP_draw);
                                   }
 		  }
                   s->damage_flag = SPDF_clear;
@@ -585,42 +609,42 @@ do_special(Vehicle *v, SpecialType special_num, int action)
 	  case SP_draw:
 	  case SP_erase:
 		  if (s->status == SP_on)
-			  (*s->proc) (v, s->record, action);
+			  (void) special_invoke(v, s, action);
 		  break;
 	  case SP_activate:
 		  if (s->status == SP_off) {
-			  s->status = (*s->proc) (v, s->record, SP_activate);
+			  s->status = special_invoke(v, s, SP_activate);
 		  }
 		  break;
 	  case SP_deactivate:
 		  if (s->status == SP_on) {
 			  s->status = SP_off;
-			  (*s->proc) (v, s->record, SP_deactivate);
+			  (void) special_invoke(v, s, SP_deactivate);
 		  }
 		  break;
 	  case SP_toggle:
 		  if (s->status == SP_off) {
-			  s->status = (*s->proc) (v, s->record, SP_activate);
+			  s->status = special_invoke(v, s, SP_activate);
 			  if (s->status == SP_on)
-				  (*s->proc) (v, s->record, SP_draw);
+				  (void) special_invoke(v, s, SP_draw);
 		  } else if (s->status == SP_on) {
 			  s->status = SP_off;
-			  (*s->proc) (v, s->record, SP_deactivate);
-			  (*s->proc) (v, s->record, SP_erase);
+			  (void) special_invoke(v, s, SP_deactivate);
+			  (void) special_invoke(v, s, SP_erase);
 		  }
 		  break;
 	  case SP_on:
 		  if (s->status == SP_off) {
-		      s->status = (*s->proc) (v, s->record, SP_activate);
+		      s->status = special_invoke(v, s, SP_activate);
 	    	      if (s->status == SP_on)
-			  (*s->proc) (v, s->record, SP_draw);
+			  (void) special_invoke(v, s, SP_draw);
 		  }
 		  break;
 	  case SP_off:
 		  if (s->status == SP_on) {
 			  s->status = SP_off;
-			  (*s->proc) (v, s->record, SP_deactivate);
-			  (*s->proc) (v, s->record, SP_erase);
+			  (void) special_invoke(v, s, SP_deactivate);
+			  (void) special_invoke(v, s, SP_erase);
 		  }
 		  break;
 	  default:
@@ -803,6 +827,11 @@ set_game_speed(int spd)
 {
 	if (spd > 0 && spd <= MAX_GAME_SPEED)
 		settings.game_speed = spd;
+
+	/* The monotonic server loop owns pacing; never arm the legacy real-time
+	   interval timer on the server path (P1.9). */
+	if (server_loop_active())
+		return;
 	start_real_counter(1 + 999999 / settings.game_speed);
 }
 
@@ -813,6 +842,11 @@ void
 check_game_speed(void)
 {
 	char reply;
+
+	/* The monotonic server loop paces each tick against an absolute deadline,
+	   so the frame pacer must not also run in the server path (P1.9). */
+	if (server_loop_active())
+		return;
 
 	if (settings.game_speed == MAX_GAME_SPEED && !game_paused)
 		return;

@@ -333,6 +333,7 @@ special_radar(Vehicle *v, char *record, int action)
 						*b = r->blip[r->num_blips - 1];
 					r->num_blips--;
 					i--;
+					special_stats.radar_expired++;	/* P1.11 */
 					break;
 			  }
 			  i++;
@@ -392,6 +393,7 @@ special_radar(Vehicle *v, char *record, int action)
 					  play_owner(v, BLIP_SOUND);
 #endif /* SOUND */
 					  b = &r->blip[r->num_blips++];
+					  special_stats.radar_acquired++;	/* P1.11 */
 					  b->x = grid2map(x) + MAP_BOX_SIZE / 4;
 					  b->y = grid2map(y) + MAP_BOX_SIZE / 4;
 					  b->life = RADAR_born;

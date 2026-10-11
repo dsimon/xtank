@@ -258,4 +258,62 @@ Taclink;
 #define TAC_UPDATE_INTERVAL 12
 #define RAD_UPDATE_INTERVAL 24
 
+/*
+** P1.11 -- knowledge versus draw.
+**
+** A special proc is driven by one of seven actions.  They divide into two
+** classes with different requirements:
+**
+**   model transitions (SP_update, SP_activate, SP_deactivate) advance the
+**   simulation's knowledge -- mapper exploration, radar contacts, camouflage
+**   and stealth surface, HUD refresh state -- and MUST run even when no
+**   terminal is presenting.  They never call a draw primitive.
+**
+**   draw actions (SP_redisplay, SP_draw, SP_erase) only paint an existing
+**   terminal.  They are delivered only while presentation is active; with
+**   presentation disabled the knowledge is kept and every draw is elided.
+**
+** SP_ACTION_IS_DRAW/SP_ACTION_IS_MODEL classify an action without knowing
+** which special it belongs to.  do_special() is the single dispatch point
+** and enforces the separation.
+*/
+#define SP_ACTION_IS_DRAW(a) \
+	((a) == SP_redisplay || (a) == SP_draw || (a) == SP_erase)
+#define SP_ACTION_IS_MODEL(a) \
+	((a) == SP_update || (a) == SP_activate || (a) == SP_deactivate)
+
+/*
+** Read-only instrumentation for the zero-presentation test.  None of these
+** values influence behaviour; they only record what the dispatch point did.
+*/
+typedef struct {
+	unsigned long model_invocations;	/* model actions delivered */
+	unsigned long draw_invocations;		/* draw actions delivered */
+	unsigned long draw_suppressed;		/* draw actions elided (no presentation) */
+	unsigned long mapper_updates;		/* mapper model scans applied */
+	unsigned long radar_acquired;		/* radar blips created */
+	unsigned long radar_expired;		/* radar blips removed on life expiry */
+} SpecialStats;
+extern SpecialStats special_stats;
+
+/*
+** Presentation gate (P1.11).  Defaults to enabled so the X front-end is
+** unchanged; the display-free server clears it (server_set_presentation(0))
+** and the P1.11 test can clear it with XTANK_NO_PRESENTATION.  A draw action
+** is only delivered to a special proc while this is true.
+*/
+int special_presentation_active(void);
+void server_set_presentation(int enabled);
+
+/*
+** Release/MVP special preset (PHASE0-BRIEF section 3): permit Console,
+** Mapper, HUD and ordinary Radar, and disable New Radar, Tac Link, Camo and
+** Rdf.  Oracle controls never call this, so they retain every special.
+** Writes INT_FORCE_* values into the caller's force_states[] array.
+*/
+void special_apply_mvp_preset(char *force_states);
+
+/* Emit the SpecialStats line; a no-op unless XTANK_SPECIALS_REPORT is set. */
+void specials_report(void);
+
 #endif /* ndef _SPECIAL_H_ */
