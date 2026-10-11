@@ -377,7 +377,9 @@ display_bullets(unsigned int status, int lastterm)
 
 		b = bset->list[i];
 
-		/* the old bullet color */
+		/* the old bullet color; the thrower reset itself is deferred to
+		   disc_clear_throwers() below so the display-free server can
+		   reproduce the identical end-of-tick bookkeeping (P1.12) */
 		if (b->type == DISC && b->thrower != -1) {
 			if (b->thrower == -2) {
 				obullet_color = WHITE;
@@ -386,8 +388,6 @@ display_bullets(unsigned int status, int lastterm)
 				obullet_color = b->thrower;
 				obuf[0] = team_char[obullet_color - 1];
 			}
-			if (lastterm)
-				b->thrower = -1;
 		} else if (b->owner != NULL) {
 			obullet_color = b->owner->color;
 			obuf[0] = team_char[b->owner->team];
@@ -472,6 +472,10 @@ display_bullets(unsigned int status, int lastterm)
 			}
 		}
 	}
+	/* The last terminal to be displayed performs the legacy one-frame
+	   thrower reset as a single end-of-pass step (P1.12). */
+	if (lastterm)
+		disc_clear_throwers();
 #ifdef USE_BATCHED_POINTS
 	if (settings.point_bullets)
 		flush_point_batch;
@@ -731,6 +735,50 @@ display_map(unsigned int status)
 	} else if (term->observer) {
 		full_mapper(status);
 		full_radar(status);
+	}
+}
+
+/*
+** P1.12 -- terminal-free map-window knowledge commit.
+**
+** display_map() both paints the map window and commits presentation-consumed
+** special state (notably New Radar's need_redisplay flag, cleared by
+** nr_t_redisplay, and the drawn-blip bookkeeping that feeds the next update).
+** The display-free server has no terminal, so its end-of-tick bookkeeping
+** calls this instead: it consumes the map-window expose state exactly as
+** display_map()/check_expose did and runs the identical SP_draw/SP_redisplay
+** callbacks, but invokes them directly (bypassing the P1.11 presentation
+** gate) so the committed state does not depend on whether a terminal is
+** presenting.  The null backend paints nothing, so no terminal render call is
+** made.
+*/
+void
+display_map_commit(Vehicle *v)
+{
+	static const SpecialType map_specials[] = {
+		MAPPER, RADAR, NEW_RADAR, TACLINK
+#ifndef NO_CAMO
+		, STEALTH, CAMO, RDF
+#endif
+	};
+	unsigned int status = REDISPLAY;
+	unsigned int action;
+	Special *s;
+	unsigned int i;
+
+	/* Consume the map-window exposure exactly as the terminal pass would, so
+	   the first (exposed) frame commits with SP_draw and the following
+	   frames with SP_redisplay -- matching the reference transition. */
+	check_expose(MAP_WIN, status);
+	action = (status == ON) ? SP_draw : SP_redisplay;
+
+	if (v == (Vehicle *) NULL || !tstflag(v->status, VS_is_alive))
+		return;
+
+	for (i = 0; i < sizeof(map_specials) / sizeof(map_specials[0]); i++) {
+		s = &v->special[(int) map_specials[i]];
+		if (s->status == SP_on)
+			(void) (*s->proc) (v, s->record, action);
 	}
 }
 

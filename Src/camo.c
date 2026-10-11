@@ -315,4 +315,24 @@ SpecialStatus special_rdf(Vehicle *v, char *record, int action)
 	}
 }
 
+/*
+** End-of-tick camouflage shadow advancement (P1.12).
+**
+** old_camod records whether a vehicle was drawn as invisible during the frame
+** just passed, so the next frame's erase/redraw decision is correct.  The
+** legacy animate() advanced it after the presentation pass; the display-free
+** server must still advance it, at that exact phase, so simulator state is
+** byte-identical.  The loop deliberately covers every vehicle slot, live or
+** not, matching the legacy comment in animate.c.  The inert field is kept.
+*/
+void
+camo_advance_shadows(void)
+{
+	extern Vehicle actual_vehicles[];
+	int i;
+
+	for (i = 0; i < MAX_VEHICLES; i++)
+		actual_vehicles[i].old_camod = actual_vehicles[i].camod;
+}
+
 #endif

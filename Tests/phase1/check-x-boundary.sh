@@ -19,9 +19,20 @@
 #               flags (no -DX11, -DNULL_BACKEND) and the deps must contain no
 #               <X11/...> header and no backend-private Include/x11.h.
 #
+# P1.12 adds:
+#   --runtime   instrument the display-free server at link time (--wrap around
+#               display_terminal, update_screen_locs, sync_terminals,
+#               get_events and multi_sync, counted only while server_step() is
+#               on the stack) and prove that advancing a whole match makes
+#               ZERO render/event/sync calls, while the produced legacy dump is
+#               byte-identical to the frozen X reference checksum.  A forced
+#               presentation control run must show the counters firing, so the
+#               instrumentation itself is proven live.
+#
 # Usage: bash Tests/phase1/check-x-boundary.sh --headers
 #        bash Tests/phase1/check-x-boundary.sh --sources
 #        bash Tests/phase1/check-x-boundary.sh --build
+#        bash Tests/phase1/check-x-boundary.sh --runtime
 # Exit:  0 clean, 1 boundary violation, 2 usage/unsupported mode.
 
 set -u
@@ -80,8 +91,10 @@ case "$mode" in
 		;;
 	--build)
 		;;
+	--runtime)
+		;;
 	*)
-		echo "check-x-boundary.sh: unknown mode '$mode' (try --headers, --sources or --build)" >&2
+		echo "check-x-boundary.sh: unknown mode '$mode' (try --headers, --sources, --build or --runtime)" >&2
 		exit 2
 		;;
 esac
@@ -281,10 +294,196 @@ check_build() {
 	echo "check-x-boundary: PASS ($scanned server translation units X-free)"
 }
 
+# ---------------------------------------------------------------------------
+# --runtime: the display-free server must make no render/event/sync call while
+# advancing a match, and must still produce the frozen legacy checksum.
+# ---------------------------------------------------------------------------
+EVIDENCE="${XTANK_P1_EVIDENCE:-/tmp/opencode/xtank-phase1/p1.12}"
+RUNTIME_WORK="$EVIDENCE/runtime"
+# Canonical frozen legacy v1 combat-2drone dump (PHASE1-PLAN.md, regression
+# strategy).
+RUNTIME_EXPECT_SHA="76f23a333a0907f9bb40fa4d9027feac39f3eccdc11aa85aa34fa33109688c6a"
+RUNTIME_EXPECT_LINES=798
+RUNTIME_SCEN="$ROOT/Tests/phase1/scenarios/combat-2drone.settings"
+
+rt_fail() { echo "check-x-boundary: FAIL $*" >&2; exit 1; }
+
+# Link-time instrumentation.  It counts a presentation call only while
+# server_step() is on the stack, so terminal construction at startup (which
+# legitimately polls events) cannot inflate the tick-path counters.
+runtime_wrapper_src() {
+	cat <<'WRAPPER'
+#include <stdio.h>
+#include <stdlib.h>
+#include "xtank.h"
+#include "graphics.h"
+#include "server.h"
+#include "proto.h"
+
+static int in_tick;
+static unsigned long n_display, n_locs, n_sync, n_events, n_multi, n_ticks;
+
+void __real_display_terminal(unsigned int, int);
+void __real_update_screen_locs(void);
+void __real_sync_terminals(Boolean);
+void __real_get_events(int *, Event *);
+void __real_multi_sync(Video **, int, Boolean);
+int  __real_server_step(void);
+
+void __wrap_display_terminal(unsigned int status, int lastterm)
+{
+	if (in_tick) n_display++;
+	__real_display_terminal(status, lastterm);
+}
+
+void __wrap_update_screen_locs(void)
+{
+	if (in_tick) n_locs++;
+	__real_update_screen_locs();
+}
+
+void __wrap_sync_terminals(Boolean discard)
+{
+	if (in_tick) n_sync++;
+	__real_sync_terminals(discard);
+}
+
+void __wrap_get_events(int *num, Event *ev)
+{
+	if (in_tick) n_events++;
+	__real_get_events(num, ev);
+}
+
+void __wrap_multi_sync(Video **v, int n, Boolean discard)
+{
+	if (in_tick) n_multi++;
+	__real_multi_sync(v, n, discard);
+}
+
+int __wrap_server_step(void)
+{
+	int r;
+
+	in_tick = 1;
+	n_ticks++;
+	r = __real_server_step();
+	in_tick = 0;
+	return r;
+}
+
+__attribute__((destructor))
+static void runtime_report(void)
+{
+	const char *p = getenv("XTANK_RUNTIME_REPORT");
+	FILE *fp = stderr;
+
+	if (p != NULL) {
+		FILE *f = fopen(p, "w");
+
+		if (f != NULL)
+			fp = f;
+	}
+	fprintf(fp,
+		"RUNTIME ticks=%lu display_terminal=%lu update_screen_locs=%lu "
+		"sync_terminals=%lu get_events=%lu multi_sync=%lu\n",
+		n_ticks, n_display, n_locs, n_sync, n_events, n_multi);
+	fflush(fp);
+	if (fp != stderr)
+		fclose(fp);
+}
+WRAPPER
+}
+
+rt_counter() {   # report-file  key
+	grep -o "$2=[0-9]*" "$1" | head -1 | cut -d= -f2
+}
+
+check_runtime() {
+	local work="$RUNTIME_WORK"
+	local src="$EVIDENCE/candidate-after-null/src"
+	local obj="$EVIDENCE/candidate-after-null/obj"
+	local wrap_c="$work/runtime_wrap.c"
+	local wrap_o="$work/runtime_wrap.o"
+	local probe="$work/xtank-runtime-probe"
+
+	mkdir -p "$work"
+	[ -f "$RUNTIME_SCEN" ] || rt_fail "missing scenario $RUNTIME_SCEN"
+
+	# 1. Build the display-free (null) candidate from the working tree.
+	bash "$ROOT/Tests/phase1/build-reference.sh" --mode candidate --subject null \
+	    --stage after --evidence "$EVIDENCE" \
+	    >"$work/build-candidate.out" 2>&1 || \
+	    rt_fail "server candidate build failed (see $work/build-candidate.out)"
+	[ -d "$obj" ] || rt_fail "missing candidate object dir $obj"
+
+	# 2. Compile the instrumentation shim and relink the server objects with
+	#    the presentation entry points wrapped.
+	runtime_wrapper_src > "$wrap_c"
+	"$CC" -O0 -g -w "${NULL_DEFS[@]}" -I"$SRC" -I"$INC" \
+	    -c "$wrap_c" -o "$wrap_o" 2>"$work/wrap.err" || \
+	    rt_fail "instrumentation shim failed to compile (see $work/wrap.err)"
+	# shellcheck disable=SC2046
+	gcc "$obj"/*.o "$wrap_o" -ldl -lm \
+	    -Wl,--wrap=display_terminal,--wrap=update_screen_locs \
+	    -Wl,--wrap=sync_terminals,--wrap=get_events,--wrap=multi_sync \
+	    -Wl,--wrap=server_step \
+	    -o "$probe" 2>"$work/link.err" || \
+	    rt_fail "instrumented server failed to link (see $work/link.err)"
+	[ -x "$probe" ] || rt_fail "instrumented server binary missing"
+
+	# 3. Normal run: presentation natively off, a whole match.
+	( cd "$src/Src" && \
+	  env -u DISPLAY -u LD_PRELOAD LC_ALL=C XTANK_DIR="$src" \
+	      XTANK_SEED=114336 XTANK_DUMP="$work/normal.state" \
+	      XTANK_DUMP_PERIOD=100 XTANK_RUNTIME_REPORT="$work/normal.report" \
+	      timeout 300 "$probe" -S -D -P -X -F "$RUNTIME_SCEN" ) \
+	    >"$work/normal.stdout" 2>&1 || \
+	    rt_fail "instrumented server run failed (see $work/normal.stdout)"
+
+	[ -s "$work/normal.report" ] || rt_fail "no runtime report"
+	local ticks k v
+	ticks=$(rt_counter "$work/normal.report" ticks)
+	[ -n "$ticks" ] && [ "$ticks" -gt 0 ] || rt_fail "no simulation ticks observed"
+	for k in display_terminal update_screen_locs sync_terminals get_events multi_sync; do
+		v=$(rt_counter "$work/normal.report" "$k")
+		[ "$v" = "0" ] || \
+		    rt_fail "server made $k calls during a match (expected 0; report: $(cat "$work/normal.report"))"
+	done
+
+	# 4. Identical checksum with no terminal pass.
+	[ -s "$work/normal.state" ] || rt_fail "instrumented server produced no dump"
+	local got_sha got_lines
+	got_sha=$(sha256sum "$work/normal.state" | awk '{print $1}')
+	got_lines=$(wc -l < "$work/normal.state")
+	[ "$got_sha" = "$RUNTIME_EXPECT_SHA" ] || \
+	    rt_fail "server dump sha256 $got_sha != frozen $RUNTIME_EXPECT_SHA"
+	[ "$got_lines" = "$RUNTIME_EXPECT_LINES" ] || \
+	    rt_fail "server dump lines $got_lines != frozen $RUNTIME_EXPECT_LINES"
+
+	# 5. Control: force the presentation pass on and prove the counters fire,
+	#    so the zero above is the gate at work, not dead instrumentation.
+	( cd "$src/Src" && \
+	  env -u DISPLAY -u LD_PRELOAD LC_ALL=C XTANK_DIR="$src" \
+	      XTANK_SEED=114336 XTANK_SERVER_PRESENT=1 XTANK_TICK_LIMIT=50 \
+	      XTANK_DUMP="$work/control.state" XTANK_DUMP_PERIOD=50 \
+	      XTANK_RUNTIME_REPORT="$work/control.report" \
+	      timeout 300 "$probe" -S -D -P -X -F "$RUNTIME_SCEN" ) \
+	    >"$work/control.stdout" 2>&1 || \
+	    rt_fail "control run failed (see $work/control.stdout)"
+	local cdisp
+	cdisp=$(rt_counter "$work/control.report" display_terminal)
+	[ -n "$cdisp" ] && [ "$cdisp" -gt 0 ] || \
+	    rt_fail "control run made no display_terminal calls; instrumentation is dead"
+
+	echo "check-x-boundary: PASS (server made 0 render/event/sync calls over $ticks ticks;"
+	echo "                    dump sha $got_sha == frozen; control display_terminal=$cdisp)"
+}
+
 case "$mode" in
   --headers) check_headers ;;
   --sources) check_sources ;;
   --build)   check_build ;;
+  --runtime) check_runtime ;;
 esac
 
 exit 0

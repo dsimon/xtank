@@ -209,6 +209,31 @@ release_discs(Vehicle *v, double dspeed, Boolean delay)
 }
 
 /*
+** End-of-tick disc bookkeeping (P1.12).
+**
+** A thrown disc's "thrower" colour is a one-frame presentation artefact: the
+** legacy last-terminal pass (display_bullets) consumed it and then reset it to
+** -1 so the next frame redraws the disc with its owner's colour.  With no
+** terminal that reset must still happen, at the same end-of-tick phase (after
+** the tick dump), or bullet state -- and every checksum over it -- would
+** drift.  This is the simulation-owned reproduction of exactly that reset; it
+** changes no gameplay rule and preserves the inert thrower field.
+*/
+void
+disc_clear_throwers(void)
+{
+	extern Bset *bset;
+	Bullet *b;
+	int i;
+
+	for (i = 0; i < bset->number; i++) {
+		b = bset->list[i];
+		if (b->type == DISC && b->thrower != -1)
+			b->thrower = -1;
+	}
+}
+
+/*
 ** Makes all discs owned by the vehicle spin in the specified direction.
 */
 void

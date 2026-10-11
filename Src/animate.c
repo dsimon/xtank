@@ -468,6 +468,17 @@ extern CLFkr command_options;
 extern int num_combatants;
 extern Combatant combatant[MAX_VEHICLES];
 
+#ifndef STATE_DUMP
+/*
+** Production player-intent seam (P1.9).  The oracle build consumes the bounded
+** queue inside its replay adapter above; a normal server run consumes it here,
+** at the legacy input phase (after bot programs, before movement).  Declared
+** locally so the frozen reference -- which is always built with -DSTATE_DUMP
+** and has no server_core.c -- never depends on it.
+*/
+extern int server_consume_intents(int tick);
+#endif
+
 /* # frames between display synchronizations */
 #ifndef LOCK_GAME_CONTROLS
 int sync_rate = 1;
@@ -488,10 +499,22 @@ animate(void)
 {
 	extern int num_terminals;
 	extern Terminal *terminal[];
+	extern Terminal *term;
 	Vehicle *v;
 	unsigned int retval;
 	int i;
 	static int quit_frame;		/* frame that game ends */
+	/*
+	** P1.12 presentation-pass gate.  The X front-end always presents (1);
+	** the display-free server never does, so it skips the per-terminal
+	** input poll, display pass and synchronization while still performing
+	** the simulation-owned end-of-tick bookkeeping below.
+	*/
+#ifdef NULL_BACKEND
+	int presenting = server_presentation_active();
+#else
+	int presenting = 1;
+#endif
 
 	/* Check for paused or slowed game */
 	check_game_speed();
@@ -579,9 +602,16 @@ animate(void)
 	*/
 	if (xtank_replay_run)
 		xtank_replay_run(frame);
+#else
+	/* Production server: apply the bounded player-intent queue for this tick
+	   at the same pre-terminal input seam (P1.9). */
+	(void) server_consume_intents(frame);
 #endif
 
-	/* Process input from all the terminals */
+	/* Process input from all the terminals.  The display-free server polls
+	   no terminal (input arrives through the bounded intent queue), so the
+	   whole event/quit pass is skipped when presentation is inactive. */
+	if (presenting)
 	for (i = 0; i < num_terminals; i++) {
 		set_terminal(i);
 		if (get_input() == GAME_QUIT) {
@@ -666,7 +696,7 @@ animate(void)
 	if (retval != GAME_RUNNING)
 		return retval;
 
-	if (!command_options.NoIO) {
+	if (presenting && !command_options.NoIO) {
 		/* Update screen locations, and display everything on each terminal */
 		for (i = 0; i < num_terminals; i++) {
 			set_terminal(i);
@@ -674,6 +704,35 @@ animate(void)
 			display_terminal(REDISPLAY, i == num_terminals - 1);
 		}
 	}
+#ifdef NULL_BACKEND
+	if (!presenting) {
+		/*
+		** Display-free server end-of-tick bookkeeping (P1.12).  The
+		** terminal pass above did not run, so reproduce the
+		** simulation-visible side effects it had, at this exact legacy
+		** phase: after the tick dump and after the pre-bookkeeping
+		** early return, and before the terminal synchronization point.
+		** This is server-owned simulation state, not presentation.
+		*/
+		disc_clear_throwers();
+#ifndef NO_CAMO
+		camo_advance_shadows();
+#endif
+		/*
+		** The terminal map/anim pass also committed presentation-
+		** consumed special state (notably New Radar's redisplay
+		** flag and the drawn-blip bookkeeping that feeds the next
+		** update).  Run the identical redisplay against the null
+		** backend for every live vehicle; the backend paints
+		** nothing, so the committed state matches the reference
+		** with no terminal render/event/sync call.
+		*/
+		for (i = 0; i < num_terminals; i++) {
+			set_terminal(i);
+			display_map_commit(term->vehicle);
+		}
+	}
+#else
 #ifndef NO_CAMO
 /*
  * kind of a funny place, eh?  It's because old_camod actually
@@ -700,9 +759,10 @@ animate(void)
 		actual_vehicles[i].old_camod = actual_vehicles[i].camod;
 
 #endif /* !NO_CAMO */
+#endif /* !NULL_BACKEND */
 
 	/* Synchronize all terminals every sync_rate frames */
-	if ((frame % sync_rate) == 0)
+	if (presenting && (frame % sync_rate) == 0)
 		sync_terminals(FALSE);
 
 	return GAME_RUNNING;
