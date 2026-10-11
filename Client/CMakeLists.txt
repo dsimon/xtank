@@ -7,6 +7,8 @@
 add_executable(xtank-client
     main.c
     platform_sdl.c
+    assets.c
+    render_sdl.c
     "${CMAKE_SOURCE_DIR}/Protocol/encode.c"
     "${CMAKE_SOURCE_DIR}/Protocol/decode.c"
     "${CMAKE_SOURCE_DIR}/Protocol/content-manifest.c"
@@ -17,7 +19,9 @@ target_include_directories(xtank-client PRIVATE
     "${CMAKE_SOURCE_DIR}/Client"
 )
 
-# Platform shell is the only translation unit allowed to include SDL3.
+# SDL3 is included only by the platform shell (platform_sdl.c) and the
+# snapshot-driven renderer (render_sdl.c); assets.c and the protocol codec are
+# pure C.
 target_link_libraries(xtank-client PRIVATE SDL3::SDL3 xtk_enet)
 
 if(UNIX)
