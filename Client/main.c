@@ -29,6 +29,7 @@
 #include <string.h>
 
 #include "platform_sdl.h"
+#include "input.h"
 #include "wire.h"
 #include "limits.h"
 #include "content-manifest.h"
@@ -410,6 +411,130 @@ static void run_dpi_math(void)
 }
 
 /*
+ * P2.12 input-controller smoke: neutral-control mapping, 15 Hz emission (never
+ * tick 0), one-shot fire edges with two-tick redundancy, held release, pause
+ * outside Running, and defocus release.  Mirrors the standalone input fixture.
+ */
+static void run_input_selftest(void)
+{
+	XtkInputController ic;
+	XtkMessage msg;
+	XtkCamera cam;
+	uint8_t enc[XTK_MAX_MESSAGE_BYTES];
+	size_t enc_len = 0;
+	double wx, wy;
+	int n, i, fire_id = 0, fire_tick1 = 0, fire_tick2 = 0, fire_tick4 = 0;
+
+	/* Separation: scancodes map to neutral controls, never engine ops. */
+	check(xtk_sdl_scancode_to_control(SDL_SCANCODE_SPACE) == XTK_CTL_FIRE,
+	      "scancode SPACE -> FIRE");
+	check(xtk_sdl_scancode_to_control(SDL_SCANCODE_W) == XTK_CTL_DRIVE_FWD,
+	      "scancode W -> DRIVE_FWD");
+	check(xtk_sdl_scancode_to_control(SDL_SCANCODE_1) == XTK_CTL_WEAPON_1,
+	      "scancode 1 -> WEAPON_1");
+	check(xtk_sdl_scancode_to_control(SDL_SCANCODE_Z) == XTK_CTL_NONE,
+	      "unmapped scancode -> NONE");
+	check(xtk_sdl_button_to_control(SDL_BUTTON_LEFT) == XTK_CTL_FIRE,
+	      "mouse left -> FIRE");
+	check(xtk_sdl_button_to_control(SDL_BUTTON_RIGHT) == XTK_CTL_FIRE_HOLD,
+	      "mouse right -> FIRE_HOLD");
+
+	/* Input inverse transform at an offset camera and 2x DPI. */
+	camera_init(&cam);
+	camera_center_on(&cam, 1000.0, 2000.0);
+	input_screen_to_world(&cam, 0.0f, 0.0f, 2.0f, &wx, &wy);
+	checkf(wx == 1000.0 - 384.0 && wy == 2000.0 - 384.0,
+	       "screen->world origin (%.1f,%.1f)", wx, wy);
+	input_screen_to_world(&cam, 1000.0f, 1000.0f, 2.0f, &wx, &wy);
+	checkf(wx == 1000.0 - 384.0 + 2000.0, "screen->world scaled x (%.1f)",
+	       wx);
+
+	input_init(&ic);
+
+	/* Nothing is emitted on tick 0 or outside Running. */
+	n = input_emit(&ic, 0, 1, 1, &msg);
+	check(n == 0, "no emit on tick 0");
+	input_set_state(&ic, XTK_INPUT_LOBBY);
+	input_control_event(&ic, XTK_CTL_PAUSE, 1);
+	check(input_paused(&ic) == 1, "pause toggles outside Running");
+	n = input_emit(&ic, 5, 1, 1, &msg);
+	check(n == 0, "no emit outside Running");
+
+	input_set_state(&ic, XTK_INPUT_RUNNING);
+	n = input_emit(&ic, 1, 1, 1, &msg);
+	check(n == 1 && msg.body.input_batch.command[0].op == XTK_OP_HEARTBEAT,
+	      "idle heartbeat while Running");
+	check(xtk_encode(enc, sizeof(enc), &msg, &enc_len) == XTK_ERR_NONE &&
+	      enc_len > 0, "heartbeat batch encodes");
+
+	/* A fire press produces exactly one edged FIRE command. */
+	input_control_event(&ic, XTK_CTL_FIRE, 1);
+	n = input_emit(&ic, 2, 1, 1, &msg);
+	check(n >= 1, "fire batch emitted");
+	for (i = 0; i < n; ++i) {
+		if (msg.body.input_batch.command[i].op == XTK_OP_FIRE) {
+			fire_tick1++;
+			fire_id = (int)msg.body.input_batch.command[i].command_id;
+		}
+	}
+	check(fire_tick1 == 1, "fire edge fires once");
+
+	/* The same command id appears in the redundancy window, then expires. */
+	for (i = 0; i < (int)XTK_INPUT_REDUNDANCY_TICKS; ++i) {
+		int t = 3 + i;
+		input_emit(&ic, t, 1, 1, &msg);
+		for (n = 0; n < (int)msg.body.input_batch.command_count; ++n) {
+			if ((int)msg.body.input_batch.command[n].command_id ==
+			    fire_id) {
+				if (t == 3) fire_tick2 = 1;
+			}
+		}
+	}
+	check(fire_tick2 == 1, "edge retransmitted within redundancy");
+	input_emit(&ic, 6, 1, 1, &msg);
+	for (n = 0; n < (int)msg.body.input_batch.command_count; ++n) {
+		if ((int)msg.body.input_batch.command[n].command_id == fire_id) {
+			fire_tick4 = 1;
+		}
+	}
+	check(fire_tick4 == 0, "edge released after redundancy window");
+
+	/* Defocus releases held drive and fire-hold. */
+	input_control_event(&ic, XTK_CTL_DRIVE_FWD, 1);
+	input_control_event(&ic, XTK_CTL_FIRE_HOLD, 1);
+	n = input_emit(&ic, 7, 1, 1, &msg);
+	check(n >= 2, "held controls emitted");
+	input_set_focus(&ic, 0);
+	check(input_focused(&ic) == 0, "focus lost");
+	n = input_emit(&ic, 8, 1, 1, &msg);
+	{
+		int drive0 = 0, fh0 = 0;
+		for (i = 0; i < n; ++i) {
+			XtkCommand *c = &msg.body.input_batch.command[i];
+			if (c->op == XTK_OP_DRIVE_REL && c->a == 0.0) drive0 = 1;
+			if (c->op == XTK_OP_FIRE_HOLD && c->a == 0.0) fh0 = 1;
+		}
+		check(drive0 && fh0, "defocus releases drive and fire");
+	}
+
+	/* Quit releases everything and is sticky. */
+	input_set_focus(&ic, 1);
+	input_control_event(&ic, XTK_CTL_DRIVE_FWD, 1);
+	input_emit(&ic, 9, 1, 1, &msg);
+	input_control_event(&ic, XTK_CTL_QUIT, 1);
+	check(input_quit_requested(&ic) == 1, "quit requested");
+	n = input_emit(&ic, 10, 1, 1, &msg);
+	{
+		int drive0 = 0;
+		for (i = 0; i < n; ++i) {
+			XtkCommand *c = &msg.body.input_batch.command[i];
+			if (c->op == XTK_OP_DRIVE_REL && c->a == 0.0) drive0 = 1;
+		}
+		check(drive0, "quit releases drive");
+	}
+}
+
+/*
  * Verify the logical-point to drawable-pixel relationship.  A conforming
  * high-DPI host (Windows 11 with SDL_WINDOW_HIGH_PIXEL_DENSITY) exposes a
  * backbuffer of logical*scale pixels.  Some hosts - notably Wine's DPI
@@ -461,6 +586,7 @@ static void run_self_test(int logical_w, int logical_h)
 	check_drawable_scale("window", lw, lh, dw, dh, scale);
 
 	run_dpi_math();
+	run_input_selftest();
 
 	/*
 	 * Drain the OS startup events (window shown/focus/enter and an initial
