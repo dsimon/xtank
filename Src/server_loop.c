@@ -69,6 +69,18 @@
 extern CLFkr command_options;
 extern int frame;
 
+/*
+ * P2.7 bounded network admission seam.  Declared weak so a build that does not
+ * link Src/server_net.c (the frozen reference, the Phase 1 candidate and every
+ * build without networking) resolves them to NULL and this loop is
+ * byte-for-byte unchanged.  When present, the admission layer services the
+ * transport without blocking, admits inputs for the next unconsumed tick
+ * before the step, and flushes acknowledgments after it.
+ */
+extern int server_net_active(void) __attribute__((weak));
+extern int server_net_pre_step(int assign_tick) __attribute__((weak));
+extern void server_net_post_step(int tick) __attribute__((weak));
+
 /* Configured simulation rate; 0 selects the legacy front-end pacer. */
 static int loop_hz = 0;
 
@@ -77,6 +89,7 @@ static long long loop_t0_ns;
 static int loop_started = 0;
 static int loop_fast = 0;
 static long loop_tick_limit = -1;
+static long loop_match_limit = -1;
 static long loop_ticks = 0;
 
 /* Bounded per-tick work reporting (1 us resolution up to 100 ms). */
@@ -151,6 +164,17 @@ loop_reset(void)
 		const char *e = getenv("XTANK_SERVER_TICKS");
 
 		loop_tick_limit = (e != NULL) ? atol(e) : -1;
+	}
+	{
+		/*
+		 * Per-match tick cap (server policy, not a gameplay rule): when the
+		 * cap is reached the match is finalized as GAME_OVER through the
+		 * normal results/reset path.  XTANK_SERVER_TICKS remains the
+		 * test-only hard stop that exits after reporting.
+		 */
+		const char *e = getenv("XTANK_SERVER_MATCH_TICKS");
+
+		loop_match_limit = (e != NULL) ? atol(e) : -1;
 	}
 
 	(void) memset(work_hist, 0, sizeof(work_hist));
@@ -271,7 +295,12 @@ server_loop_run(void)
 	loop_reset();
 
 	for (;;) {
+		int net;
+
 		tick = frame + 1;
+		net = (server_net_active != NULL && server_net_active() != 0);
+		if (net)
+			(void) server_net_pre_step(tick);
 
 		/* Count a missed deadline: we are about to run behind schedule. */
 		if (loop_hz > 0 && !loop_fast &&
@@ -285,10 +314,14 @@ server_loop_run(void)
 			long long b;
 
 			status = (unsigned int) server_step();
+			if (net)
+				server_net_post_step(frame);
 			b = now_ns();
 			loop_note_work(b - a);
 		} else {
 			status = (unsigned int) server_step();
+			if (net)
+				server_net_post_step(frame);
 		}
 
 		loop_ticks++;
@@ -298,6 +331,11 @@ server_loop_run(void)
 		if (loop_tick_limit > 0 && loop_ticks >= loop_tick_limit) {
 			loop_report();
 			exit(0);
+		}
+		if (loop_match_limit > 0 && loop_ticks >= loop_match_limit) {
+			/* Bounded match: finalize through the normal results path. */
+			status = GAME_OVER;
+			break;
 		}
 	}
 
