@@ -1,0 +1,203 @@
+# Protocol v1 golden-fixture expected fields (hand-authored, P2.2).
+#
+# Format: <fixture> <path> = <value>
+#   - paths are relative to the decoded payload, except "envelope.<field>".
+#   - integers accept 0x hex or decimal; strings are quoted; bytes are hex:.
+# verify.py decodes the committed .hex independently and asserts these.
+
+# ---- HELLO ---------------------------------------------------------------
+hello envelope.magic = 0x58544B31
+hello envelope.version_major = 1
+hello envelope.version_minor = 0
+hello envelope.type = 0x01
+hello envelope.channel = 0
+hello envelope.payload_length = 46
+hello envelope.session_id = 0
+hello envelope.epoch = 0
+hello envelope.message_sequence = 1
+hello envelope.tick = 0
+hello client_nonce = 0x0A0B0C0D
+hello proto_major = 1
+hello proto_minor = 0
+hello client_build = 0x0042
+hello name = "pilot"
+hello content_set_digest = hex:32a94c128ee21438bbe389974dd05654e66bf3ed7aa1f1ef2520fc8dc1e1aec0
+
+# ---- WELCOME -------------------------------------------------------------
+welcome envelope.type = 0x02
+welcome envelope.session_id = 0x11223344
+welcome server_nonce = 0xDEADBEEF
+welcome role = 1
+welcome tick_hz = 15
+welcome max_players = 4
+welcome reserved = 0
+
+# ---- REJECT: version mismatch -------------------------------------------
+reject_version envelope.type = 0x03
+reject_version error_code = 0x0002
+reject_version detail_code = 0
+reject_version text = "protocol version"
+
+# ---- REJECT: content mismatch -------------------------------------------
+reject_content error_code = 0x0011
+reject_content detail_code = 0
+reject_content text = "content mismatch"
+
+# ---- CONTENT_CATALOG -----------------------------------------------------
+catalog envelope.type = 0x10
+catalog content_set_digest = hex:32a94c128ee21438bbe389974dd05654e66bf3ed7aa1f1ef2520fc8dc1e1aec0
+catalog entry_count = 3
+catalog entry[0].id = 0x0101
+catalog entry[0].kind = 1
+catalog entry[0].name = "combat1"
+catalog entry[0].source_sha256 = hex:d384f05cca5ac29e19b35f7605e9b1c31c2db6038a82020d250bbae1bce499e2
+catalog entry[1].id = 0x0102
+catalog entry[1].name = "Arena"
+catalog entry[2].id = 0x0201
+catalog entry[2].kind = 2
+catalog entry[2].name = "Vanguard"
+catalog entry[2].source_sha256 = hex:04dc0e299b9dad4a13ca0dcea53001c94cc3209036b6d4404bd3f6a53049cf11
+
+# ---- CONFIG_SELECT -------------------------------------------------------
+config_select envelope.channel = 0
+config_select maze_id = 0x0101
+config_select vehicle_id = 0x0201
+config_select reserved = 0
+
+# ---- START ---------------------------------------------------------------
+start envelope.epoch = 1
+start envelope.tick = 1
+start start_tick = 1
+start maze_id = 0x0101
+start vehicle_id = 1
+start reserved = 0
+
+# ---- EPOCH_BEGIN ---------------------------------------------------------
+epoch_begin envelope.channel = 0
+epoch_begin envelope.type = 0x15
+epoch_begin epoch = 1
+epoch_begin first_tick = 1
+
+# ---- RESULTS -------------------------------------------------------------
+results envelope.type = 0x16
+results end_tick = 231
+results result_kind = 0
+results winner_slot = 0
+results vehicle_count = 2
+results entry[0].slot = 0
+results entry[0].generation = 1
+results entry[0].score = 1000
+results entry[0].name = "pilot"
+results entry[1].slot = 1
+results entry[1].generation = 2
+results entry[1].score = 100
+results entry[1].name = "drone"
+
+# ---- EVENT ---------------------------------------------------------------
+event envelope.channel = 0
+event envelope.tick = 170
+event event_sequence = 5
+event event_type = 6
+event entity_kind = 1
+event entity_id = 0
+event entity_generation = 1
+event aux0 = 9
+event aux1 = 6
+event text = ""
+
+# ---- CMD_ACK -------------------------------------------------------------
+cmd_ack envelope.type = 0x21
+cmd_ack count = 2
+cmd_ack entry[0].command_id = 100
+cmd_ack entry[0].assigned_tick = 171
+cmd_ack entry[0].status = 0
+cmd_ack entry[0].reason = 0
+cmd_ack entry[1].command_id = 101
+cmd_ack entry[1].status = 2
+cmd_ack entry[1].reason = 0x1E
+
+# ---- RELIABLE_CMD --------------------------------------------------------
+reliable_cmd envelope.channel = 0
+reliable_cmd envelope.type = 0x23
+reliable_cmd last_observed_server_tick = 170
+reliable_cmd command_count = 1
+reliable_cmd command[0].command_id = 101
+reliable_cmd command[0].op = 0x04
+reliable_cmd command[0].flags = 0x01
+reliable_cmd command[0].a = 0.0
+reliable_cmd command[0].b = 0.0
+
+# ---- PROTOCOL_ERROR ------------------------------------------------------
+protocol_error envelope.channel = 0
+protocol_error envelope.type = 0x22
+protocol_error error_code = 0x0004
+protocol_error detail = 0
+protocol_error offending_sequence = 7
+protocol_error offending_type = 0x40
+
+# ---- INPUT_BATCH ---------------------------------------------------------
+input_batch envelope.type = 0x60
+input_batch envelope.channel = 2
+input_batch envelope.epoch = 1
+input_batch packet_sequence = 10
+input_batch last_observed_server_tick = 170
+input_batch command_count = 2
+input_batch command[0].command_id = 100
+input_batch command[0].tick_hint = 171
+input_batch command[0].op = 0x01
+input_batch command[0].flags = 0x02
+input_batch command[0].a = 3.5
+input_batch command[0].b = 0.0
+input_batch command[1].command_id = 101
+input_batch command[1].op = 0x04
+input_batch command[1].flags = 0x01
+
+# ---- VIEW_SNAPSHOT -------------------------------------------------------
+view_snapshot envelope.type = 0x40
+view_snapshot envelope.channel = 1
+view_snapshot envelope.tick = 170
+view_snapshot snapshot_sequence = 42
+view_snapshot server_tick = 170
+view_snapshot flags = 0x0001
+view_snapshot own_slot = 0
+view_snapshot own_generation = 1
+view_snapshot vehicle_count = 1
+view_snapshot bullet_count = 1
+view_snapshot explosion_count = 0
+view_snapshot map_cell_count = 1
+view_snapshot landmark_count = 0
+view_snapshot radar_blip_count = 0
+view_snapshot weapon_count = 2
+view_snapshot map_revision = 3
+view_snapshot self.armor[0] = 100
+view_snapshot self.armor[1] = 90
+view_snapshot self.armor[2] = 80
+view_snapshot self.armor[3] = 70
+view_snapshot self.fuel = 500
+view_snapshot self.heat = 20
+view_snapshot self.score = 1000
+view_snapshot self.ammo[0] = 10
+view_snapshot self.ammo[1] = 20
+view_snapshot self.weapon_enabled_bitmap = 3
+view_snapshot self.reload[1] = 5
+view_snapshot vehicle[0].slot = 0
+view_snapshot vehicle[0].generation = 1
+view_snapshot vehicle[0].kind = 6
+view_snapshot vehicle[0].x = 100.5
+view_snapshot vehicle[0].y = 200.25
+view_snapshot vehicle[0].body_angle = 1.5707963267948966
+view_snapshot vehicle[0].turret_angle = 3.141592653589793
+view_snapshot bullet[0].id = 7
+view_snapshot bullet[0].x = 101.5
+view_snapshot bullet[0].owner_slot = 0
+view_snapshot bullet[0].owner_generation = 1
+view_snapshot cell[0].grid_x = 15
+view_snapshot cell[0].grid_y = 10
+view_snapshot cell[0].flags = 0x03
+
+# ---- Cross-endian raw values --------------------------------------------
+endian u16 = 0x0102
+endian u32 = 0x01020304
+endian i32 = -2
+endian f64 = 1.0
+endian len = 18

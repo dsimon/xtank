@@ -1,0 +1,31 @@
+# Xtank release-preset canonical identity (protocol v1, frozen P2.2).
+#
+# This file is the canonical byte representation of the approved Phase 2
+# release configuration (PHASE0-BRIEF section 3, verified by P1.14 content.sh).
+# Its SHA-256 is pinned in Protocol/content-manifest.c and contributes to the
+# v1 content_set_digest exchanged in HELLO/CONTENT_CATALOG.  Any edit here is a
+# content-identity change and invalidates every client build until re-pinned.
+#
+# Format: one "key=value" per line, keys sorted, LF-terminated, ASCII, no
+# spaces.  The digest is over these exact bytes, including this header and the
+# trailing newline of the final line.
+schema=xtank-release-preset-v1
+game=combat
+mode=ffa
+team_score=0
+restart=1
+robots_dont_win=0
+winning_score=1000
+tick_hz=15
+max_vehicles=4
+vehicle=Vanguard
+maze=combat1
+maze=Arena
+special.console=permitted
+special.mapper=permitted
+special.radar=permitted
+special.hud=permitted
+special.new_radar=disabled
+special.tac_link=disabled
+special.camo=disabled
+special.rdf=disabled
