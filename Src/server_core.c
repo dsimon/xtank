@@ -254,6 +254,41 @@ server_frame_reset(void)
 }
 
 /*
+** P1.12 presentation-pass gate.
+**
+** This is deliberately a different question from the P1.11 specials draw gate
+** (special_presentation_active): it decides whether animate() runs the
+** per-terminal input poll, the per-terminal display pass and terminal
+** synchronization at all.  The X front-end always presents, so the legacy
+** front-end path in animate() is unchanged.  The display-free server never
+** presents: it omits the terminal pass entirely and reproduces the small set
+** of simulation-visible side effects that pass used to have (the end-of-tick
+** disc thrower reset and the camouflage shadow advancement) as server-owned
+** bookkeeping.
+**
+** XTANK_SERVER_PRESENT is a test-only control (used by
+** Tests/phase1/check-x-boundary.sh --runtime to show the runtime
+** instrumentation observes the calls when the gate is forced on); a real run
+** never sets it.
+*/
+int
+server_presentation_active(void)
+{
+#ifdef NULL_BACKEND
+	static int cached = -1;
+
+	if (cached < 0) {
+		const char *e = getenv("XTANK_SERVER_PRESENT");
+
+		cached = (e != NULL && atoi(e) != 0) ? 1 : 0;
+	}
+	return cached;
+#else
+	return 1;
+#endif
+}
+
+/*
 ** Explicit, backend-independent tick pacing (P1.9).  When the monotonic loop
 ** is active this is the absolute-deadline pacer; otherwise it falls back to
 ** the legacy game-speed pacer so the X front-end is unchanged.  The production
@@ -307,9 +342,24 @@ server_match_init(void)
 {
 	extern int num_combatants;
 	extern Boolean game_running;
+	extern char force_states[MAX_SPECIALS];
 
 	if (num_combatants == 0)
 		return GAME_FAILED;
+
+	/*
+	 * P1.11 release/MVP special preset.  The shipped local server selects it
+	 * unconditionally (P1.15).  The oracle control scenarios rely on the
+	 * environment gate to keep New Radar, Tac Link, Camo and Rdf, so those
+	 * builds (which do not define SERVER_ONLY) keep the XTANK_MVP_PRESET test
+	 * seam.
+	 */
+#ifdef SERVER_ONLY
+	special_apply_mvp_preset(force_states);
+#else
+	if (getenv("XTANK_MVP_PRESET") != NULL)
+		special_apply_mvp_preset(force_states);
+#endif
 
 	server_geometry_init();
 

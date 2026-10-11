@@ -110,6 +110,7 @@ void set_disc_owner P_((Bullet *, Vehicle *));
 int get_disc_team P_((Bullet *));
 void release_discs P_((Vehicle *, double, Boolean));
 void set_disc_team P_((Bullet *, int));
+void disc_clear_throwers P_((void));
 
 /* display.c */
 void display_terminal P_((unsigned int status, int lastterm));
@@ -120,6 +121,7 @@ void display_bullets P_((unsigned int status, int lastterm));
 void display_explosions P_((unsigned int status));
 void display_maze P_((unsigned int status));
 void display_map P_((unsigned int status));
+void display_map_commit P_((Vehicle *v));
 void display_cons P_((unsigned int status));
 void display_help P_((unsigned int status));
 void display_pics P_((void));
@@ -437,6 +439,16 @@ void set_current_vehicle P_((Vehicle *));
 void init_prog_descs P_((void));
 void init_specials P_((Vehicle *));
 void zap_specials P_((Vehicle *));
+/* P1.11 knowledge-versus-draw seam (definitions in program.c, declared in
+   special.h; repeated here for the legacy prototype header). */
+int special_presentation_active P_((void));
+void server_set_presentation P_((int));
+/* P1.12 display/presentation-pass gate (server_core.c): distinct from the
+   P1.11 specials draw gate.  Always active for the X front-end; natively
+   inactive for the display-free server so it runs no terminal pass. */
+int server_presentation_active P_((void));
+void special_apply_mvp_preset P_((char *));
+void specials_report P_((void));
 void init_programs P_((Vehicle *));
 static int run_program P_((Program *));
 void stop_program P_((void));
@@ -449,6 +461,7 @@ void run_all_programs P_((void));
 SpecialStatus special_stealth P_((Vehicle *, char *, int));
 SpecialStatus special_camo P_((Vehicle *, char *, int));
 SpecialStatus special_rdf P_((Vehicle *, char *, int));
+void camo_advance_shadows P_((void));
 
 /* hud.c */
 void draw_armor P_((int armor, Angle ang));

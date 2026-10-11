@@ -39,6 +39,127 @@ extern Vehicle *cv;
 extern Map real_map;
 extern Settings settings;
 
+/* ------------------------------------------------------------------ */
+/* P1.11 -- knowledge versus draw                                       */
+/* ------------------------------------------------------------------ */
+
+/* Read-only dispatch instrumentation (see special.h). */
+SpecialStats special_stats;
+
+/*
+** Presentation gate.  Enabled by default so the X front-end is unchanged;
+** the display-free server clears it.  XTANK_NO_PRESENTATION is a test-only
+** seam used by Tests/phase1/specials.sh.
+*/
+static int specials_presentation = 1;
+
+void
+server_set_presentation(int enabled)
+{
+	specials_presentation = enabled ? 1 : 0;
+}
+
+int
+special_presentation_active(void)
+{
+	return specials_presentation;
+}
+
+/*
+** Release/MVP special preset (PHASE0-BRIEF section 3).  Ordinary Radar,
+** Mapper, Console and HUD remain; New Radar, Tac Link, Camo and Rdf are
+** disabled.  The oracle control scenarios never call this, so they keep all
+** four for the regression.
+*/
+void
+special_apply_mvp_preset(char *force_states)
+{
+	int i;
+
+	for (i = 0; i < MAX_SPECIALS; i++)
+		force_states[i] = INT_FORCE_DONT;
+
+	force_states[CONSOLE] = INT_FORCE_DONT;
+	force_states[MAPPER] = INT_FORCE_DONT;
+	force_states[RADAR] = INT_FORCE_DONT;
+#ifndef NO_HUD
+	force_states[HUD] = INT_FORCE_DONT;
+#else
+	force_states[DEEPRADAR] = INT_FORCE_DONT;
+#endif
+	force_states[NEW_RADAR] = INT_FORCE_OFF;
+	force_states[TACLINK] = INT_FORCE_OFF;
+#ifndef NO_CAMO
+	force_states[CAMO] = INT_FORCE_OFF;
+	force_states[RDF] = INT_FORCE_OFF;
+#endif
+}
+
+/*
+** Zero-presentation probe (P1.11 test only).  When XTANK_SPECIALS_PROBE is
+** set, force one draw action per live special through the dispatch point and
+** then one model update.  With presentation disabled every draw is elided;
+** the model scan still applies.  It changes no state by itself beyond the
+** (deliberate) model update, and is never active in a normal run.
+*/
+static void
+specials_probe(Vehicle *v)
+{
+	static const SpecialType probe[] = { MAPPER, RADAR, NEW_RADAR, HUD };
+	unsigned int i;
+
+	for (i = 0; i < sizeof(probe) / sizeof(probe[0]); i++) {
+		if (v->special[(int) probe[i]].status != SP_nonexistent) {
+			do_special(v, probe[i], SP_draw);
+			do_special(v, probe[i], SP_erase);
+		}
+	}
+	do_special(v, MAPPER, SP_update);
+}
+
+/* Emit the counters at process exit; only when XTANK_SPECIALS_REPORT is set. */
+void
+specials_report(void)
+{
+	char *path = getenv("XTANK_SPECIALS_REPORT");
+	FILE *fp;
+
+	if (path == NULL)
+		return;
+	if (strcmp(path, "-") == 0)
+		fp = stderr;
+	else
+		fp = fopen(path, "w");
+	if (fp == NULL)
+		fp = stderr;
+
+	fprintf(fp,
+		"SPECIALS-STATS model=%lu draw=%lu suppressed=%lu "
+		"mapper=%lu radar_acquired=%lu radar_expired=%lu "
+		"presentation=%d\n",
+		special_stats.model_invocations, special_stats.draw_invocations,
+		special_stats.draw_suppressed, special_stats.mapper_updates,
+		special_stats.radar_acquired, special_stats.radar_expired,
+		special_presentation_active());
+	if (fp != stderr)
+		fclose(fp);
+}
+
+static void
+specials_report_atexit(void)
+{
+	specials_report();
+}
+
+__attribute__((constructor))
+static void
+specials_report_init(void)
+{
+	if (getenv("XTANK_NO_PRESENTATION") != NULL)
+		server_set_presentation(0);
+	atexit(specials_report_atexit);
+}
+
 /* Time (in microseconds) a program is allotted per frame (on average) */
 #define PROGRAM_ALLOT 5000
 
@@ -62,6 +183,31 @@ int num_prog_descs;
 /* Pointer to the program scheduler's thread */
 XtankThread *scheduler_thread;
 
+/* ------------------------------------------------------------------ */
+/* P1.13 -- tick-cooperative server scheduling                         */
+/* ------------------------------------------------------------------ */
+/*
+** The legacy front-end decides how long a program may run from measured CPU
+** time (the virtual interval timer and check_time()).  The display-free server
+** is tick-cooperative: each eligible program runs exactly one iteration and
+** yields at done(), so scheduling never depends on CPU time.  threadglue.c
+** selects the mode at startup from server_loop_active(); nothing else in this
+** file changes for the front-end path.
+*/
+static int prog_cooperative = 0;
+
+void
+program_set_cooperative(int on)
+{
+	prog_cooperative = on ? 1 : 0;
+}
+
+int
+program_cooperative(void)
+{
+	return prog_cooperative;
+}
+
 /*
 ** Changes the current vehicle pointer to the specified vehicle.
 ** All xtanklib functions act on the current vehicle.
@@ -80,6 +226,14 @@ init_prog_descs(void)
 {
 	int iCtr;
 	extern Prog_desc
+#ifdef SERVER_ONLY
+		drone_prog;
+	/*
+	 * The shipped server links and registers only the cooperative drone
+	 * program (P1.15).  The four-drone/Madman oracle harness builds without
+	 * -DSERVER_ONLY and keeps the full program set.
+	 */
+#else
 		drone_prog,
 		eliza_prog,
 		Flipper_prog,
@@ -92,9 +246,11 @@ init_prog_descs(void)
 		gnat_prog,
 		rdfbot_prog,
 		mmtf_prog;
+#endif
 
 	num_prog_descs = 0;
 	prog_desc[num_prog_descs++] = &drone_prog;
+#ifndef SERVER_ONLY
 	prog_desc[num_prog_descs++] = &eliza_prog;
 	prog_desc[num_prog_descs++] = &Flipper_prog;
 	prog_desc[num_prog_descs++] = &Diophantine_prog;
@@ -105,6 +261,7 @@ init_prog_descs(void)
 	prog_desc[num_prog_descs++] = &gnat_prog;
 	prog_desc[num_prog_descs++] = &rdfbot_prog;
 	prog_desc[num_prog_descs++] = &mmtf_prog;
+#endif
 
 	for (iCtr = 0; iCtr < num_prog_descs; iCtr++) {
 		prog_desc[iCtr]->filename = (char *) 0;
@@ -167,6 +324,10 @@ init_specials(Vehicle *v)
 			v->special[i].damage_flag = SPDF_clear;
 		}
 	}
+
+	/* P1.11 zero-presentation probe (test only; see specials_probe). */
+	if (getenv("XTANK_SPECIALS_PROBE") != NULL)
+		specials_probe(v);
 }
 
 
@@ -298,6 +459,23 @@ run_all_programs(void)
 static int
 run_program(Program *prog)
 {
+	if (prog_cooperative) {
+		/*
+		 * One iteration per eligible tick.  The program yields back to
+		 * this scheduler at done(); a program that fails to yield is
+		 * diagnosed by the watchdog rather than silently preempted.
+		 * Charge exactly the per-frame allotment so the legacy
+		 * eligibility gate -- and hence the first-tick/respawn
+		 * deferral -- is preserved bit for bit.
+		 */
+		program_watchdog_start();
+		thread_switch((XtankThread *) prog->thread);
+		program_watchdog_stop();
+
+		prog->total_time += PROGRAM_ALLOT;
+		return PROGRAM_ALLOT;
+	}
+
 	/* Start up interval counter to time programs */
 	clear_clock();
 	write_clock(&end_time, PROGRAM_TIME);
@@ -328,6 +506,13 @@ run_program(Program *prog)
 void
 check_time(void)
 {
+	/*
+	 * Server scheduling is tick-cooperative, so a program may not be
+	 * preempted on a CPU-time budget; it always runs to its next done().
+	 */
+	if (prog_cooperative)
+		return;
+
 	/* If there is a program running */
 	if (cv->current_prog != (Program *) NULL) {
 		/* If the program has been running too long, stop it */
@@ -349,6 +534,18 @@ void
 stop_program(void)
 {
 	Clock temp;
+
+	if (prog_cooperative) {
+		/*
+		 * done(): yield to the scheduler without any CPU-time
+		 * accounting.  The per-run charge is applied by run_program().
+		 */
+		if (cv->current_prog != (Program *) NULL)
+			thread_switch(scheduler_thread);
+		else
+			printf("stop_program(): no program??\n");
+		return;
+	}
 
 	if (cv->current_prog != (Program *) NULL) {
 		/* Up the elapsed time to the given amount */
