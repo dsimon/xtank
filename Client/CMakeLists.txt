@@ -9,6 +9,10 @@ add_executable(xtank-client
     platform_sdl.c
     assets.c
     render_sdl.c
+    timeline.c
+    camera.c
+    model.c
+    world_render.c
     "${CMAKE_SOURCE_DIR}/Protocol/encode.c"
     "${CMAKE_SOURCE_DIR}/Protocol/decode.c"
     "${CMAKE_SOURCE_DIR}/Protocol/content-manifest.c"
