@@ -37,6 +37,7 @@
 #include "assert.h"
 #include "bullet.h"
 #include "proto.h"
+#include "server.h"
 #ifdef SOUND
 #include "sound.h"
 #endif /* SOUND */
@@ -343,9 +344,11 @@ activate_vehicle(Vehicle *v)
 		w->refill_counter = weapon_stat[(int) w->type].refill_time;
 	}
 
-	/* Set up each player's terminal */
+	/* Set up each player's terminal (legacy X front-end only; a
+	   terminal-free human has an explicit binding and no Terminal). */
 	for (i = 0; i < c->num_players; i++)
-		setup_terminal(c->player[i], v);
+		if (server_player_terminal(c->player[i]) != (void *) NULL)
+			setup_terminal(c->player[i], v);
 
 	/* Place vehicle in maze, must be done *before* initializing specials */
 	if (place_vehicle(v) == -1) {
@@ -399,10 +402,14 @@ Vehicle *victim;
 	}
 
 
-	/* Let the terminals know that they have no vehicle to track */
+	/* Let the terminals know that they have no vehicle to track.  A
+	   terminal-free human has no Terminal; its binding is unchanged across
+	   death/respawn so it keeps driving the same slot. */
 	for (i = 0; i < victim->owner->num_players; i++) {
-            if (terminal[victim->owner->player[i]])   /* HAK 2/93 */
-		terminal[victim->owner->player[i]]->vehicle = (Vehicle *) NULL;
+		Terminal *t = (Terminal *) server_player_terminal(victim->owner->player[i]);
+
+		if (t != NULL)
+			t->vehicle = (Vehicle *) NULL;
 	}
 
 	/* Remove victim's flag from the map */

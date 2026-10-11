@@ -193,9 +193,30 @@ init_combatants(void)
 		c = &combatant[i];
 		/* name combatant after player, or failing that a program */
 		if (c->num_players) {
-			(void) strncpy(c->name, terminal[c->player[0]]->player_name,
-						   MAX_STRING - 1);
-			
+			/*
+			 * A legacy human is named from its Terminal.  A terminal-free
+			 * human (P2.4) has no Terminal: resolve/claim its explicit
+			 * binding by name and keep the bound player name.
+			 */
+			Terminal *t = (Terminal *) server_player_terminal(c->player[0]);
+
+			if (t != NULL) {
+				(void) strncpy(c->name, t->player_name, MAX_STRING - 1);
+			} else {
+				int b = server_players_index_for_player(c->player[0]);
+
+				if (b < 0)
+					b = server_players_claim_name(c->name, i);
+				if (b >= 0) {
+					const char *nm = server_players_name_for_slot(i);
+
+					c->player[0] = b;
+					if (nm != NULL && nm[0] != '\0') {
+						(void) strncpy(c->name, nm, MAX_STRING - 1);
+						c->name[MAX_STRING - 1] = '\0';
+					}
+				}
+			}
 		} else {
 			assert(c->num_programs > 0);
 			(void) strncpy(c->name, prog_desc[c->program[0]]->name,
@@ -400,8 +421,12 @@ setup_combatant(Combatant *c)
 	c->vehicle = v;
 
 	for (i = 0; i < c->num_players; i++) {
-		terminal[c->player[i]]->observer = False;
-		terminal[c->player[i]]->teleview = False;
+		Terminal *t = (Terminal *) server_player_terminal(c->player[i]);
+
+		if (t != NULL) {
+			t->observer = False;
+			t->teleview = False;
+		}
 	}
 
 	return activate_vehicle(v);

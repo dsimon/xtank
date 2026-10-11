@@ -89,6 +89,93 @@ int server_config_add_player(ServerConfig *cfg, const char *name);
 const char *server_player_name(int terminal_index);
 
 /*
+ * Explicit terminal-free human binding (P2.4).
+ *
+ * Legacy humans are Terminal objects and the engine binds a human to a tank
+ * through terminal[c->player[i]].  A terminal-free (network/local server)
+ * human is instead an explicit binding owned by the server:
+ *
+ *   controller  a stable controller/session id (NOT a terminal slot),
+ *   slot        the combatant/vehicle index the controller drives,
+ *   generation  bumped whenever the binding is (re)bound to a slot, so a
+ *               respawned or reassigned slot cannot be driven by a stale
+ *               controller without validation, and
+ *   name        the player name shown and matched against settings.
+ *
+ * These functions never allocate a Terminal.  The legacy X front-end does not
+ * use them; the display-free server does.  All functions are idempotent and
+ * bounded (SERVER_MAX_HUMANS).
+ */
+#define SERVER_MAX_HUMANS	SERVER_RELEASE_MAX_VEHICLES
+
+typedef struct {
+	int used;
+	int controller;			/* stable controller/connection id */
+	unsigned int generation;	/* bumped on (re)bind */
+	int slot;			/* combatant/vehicle index, -1 unbound */
+	char name[MAX_STRING + 1];
+} ServerHumanBinding;
+
+/* Clear every binding (called once per process before a match is built). */
+void server_players_init(void);
+
+/*
+ * Register a named human controlled by `controller` (>= 0).  Returns the
+ * binding index, or -1 on a full table, a NULL/empty name, a duplicate name or
+ * a duplicate controller.  The new binding starts unbound (slot -1),
+ * generation 1.
+ */
+int server_players_add(const char *name, int controller);
+
+/* Number of registered human bindings and read-only access to one. */
+int server_players_count(void);
+const ServerHumanBinding *server_players_binding(int index);
+
+/*
+ * Bind binding `index` to combatant/vehicle `slot`.  If another binding already
+ * owns that slot, its generation is bumped and it is unbound first, so the
+ * displaced controller can no longer drive the slot.  Returns 0 on success,
+ * -1 on a bad index/slot.
+ */
+int server_players_bind_slot(int index, int slot);
+
+/* Release whatever binding owns `slot` (bumping its generation). */
+void server_players_unbind_slot(int slot);
+
+/*
+ * Resolve/claim a combatant slot for a terminal-free human named `name`.
+ * If a binding with that name exists it is bound to `slot` (idempotently) and
+ * its index returned; otherwise -1.  Used by init_combatants() to attach a
+ * settings-defined human to its explicit controller.
+ */
+int server_players_claim_name(const char *name, int slot);
+
+/* Binding index for a raw player[] value, or -1 if it is not a live binding. */
+int server_players_index_for_player(int player);
+
+/* Name of the binding bound to `slot`, or "" when none. */
+const char *server_players_name_for_slot(int slot);
+
+/*
+ * Controller ownership check.  Returns 1 only when `controller` owns `slot`
+ * with exactly `generation`; a stale generation or a different slot is 0.
+ * A negative generation means "ignore generation".
+ */
+int server_players_validate(int controller, int slot, unsigned int generation);
+
+/* 1 when at least one terminal-free human binding is registered. */
+int server_players_active(void);
+
+/*
+ * Safe terminal accessor for the legacy terminal-facing setup paths.  Returns
+ * terminal[player_index] when that legacy terminal exists, or NULL when the
+ * run is terminal-free (num_terminals == 0) or the slot is out of range.  The
+ * caller must treat NULL as "no terminal to configure" and skip the legacy
+ * terminal work; the binding above carries the human identity instead.
+ */
+void *server_player_terminal(int player_index);
+
+/*
  * Approved release/MVP configuration (P1.14, PHASE0-BRIEF section 3).
  * server_release_settings() starts from init_settings() and applies only the
  * approved overrides: Combat free-for-all (team scoring off), respawn on,

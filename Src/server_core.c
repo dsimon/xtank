@@ -212,6 +212,7 @@ void
 server_init(ServerConfig *cfg)
 {
 	intent_init();
+	server_players_init();
 
 	if (cfg != NULL && cfg != &the_config)
 		the_config = *cfg;

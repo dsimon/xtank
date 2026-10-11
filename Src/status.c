@@ -115,7 +115,12 @@ init_vehicle_status(Vehicle *v)
 	vs->vehicle = v;
 	vs->dead = FALSE;
 	/* %%% what about multiple players? -RDP */
-	if (v->owner->num_players)	/* num_players s/b num_terms */
+	/*
+	 * Legacy humans expose a status window through their Terminal.  A
+	 * terminal-free human (P2.4) has no Terminal and no Video, so only
+	 * touch the presentation window when a terminal/video exists.
+	 */
+	if (v->owner->num_players && num_terminals > 0)
 		expose_win(STAT_WIN + v->number, TRUE);
 }
 

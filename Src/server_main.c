@@ -120,6 +120,7 @@ server_usage(const char *prog)
 		   SERVER_DEFAULT_VEHICLE);
 	printf("  --drones N         local drone players, 0..%d (default %d)\n",
 		   SERVER_MAX_DRONES, SERVER_DEFAULT_DRONES);
+	printf("  --human NAME       one terminal-free human controller (P2.4)\n");
 	printf("  --seed N           explicit RNG seed (default XTANK_SEED)\n");
 	printf("  --matches N        matches to play/reset (default 1)\n");
 	printf("  --max-ticks N      bound each match to N ticks (0 = unlimited)\n");
@@ -172,20 +173,45 @@ server_find_assets(char *out, size_t outsz)
 }
 
 /*
-** Build the local combatant set: `n` drone bots in Vanguards, on distinct
-** teams, with no human player slots.  This replaces the graphical lobby's
-** customized-combatants grid.
+** Build the local combatant set: an optional terminal-free human in Vanguard
+** slot 0, then `n` drone bots in Vanguards, on distinct teams.  This replaces
+** the graphical lobby's customized-combatants grid.  The human is bound
+** explicitly (name -> controller 0 -> slot 0) and is never given a Terminal.
 */
 static void
-server_build_combatants(int n, int vdesc_index)
+server_build_combatants(int n, int vdesc_index, const char *human)
 {
 	extern Combatant combatant[];
 	extern int num_combatants;
 	Combatant *c;
-	int i;
+	int i, total;
 
-	num_combatants = n;
-	for (i = 0; i < n; i++) {
+	total = n + (human != NULL ? 1 : 0);
+	if (total == 0)
+		total = 1;			/* callers validate; keep a sane default */
+	num_combatants = total;
+
+	i = 0;
+	if (human != NULL) {
+		int b;
+
+		server_players_init();
+		b = server_players_add(human, 0);
+		if (b >= 0)
+			(void) server_players_bind_slot(b, 0);
+
+		c = &combatant[0];
+		c->num_players = 1;
+		c->player[0] = (b >= 0) ? b : 255;	/* 255 == UNDEFINED */
+		c->num_programs = 0;
+		c->team = 1 % MAX_TEAMS;
+		c->vdesc = vdesc_index;
+		(void) strncpy(c->name, human, MAX_STRING - 1);
+		c->name[MAX_STRING - 1] = '\0';
+		i = 1;
+	}
+
+	for (; i < total; i++) {
 		c = &combatant[i];
 		c->num_players = 0;
 		c->num_programs = 1;
@@ -202,6 +228,7 @@ main(int argc, char *argv[])
 	const char *maze_name = SERVER_DEFAULT_MAZE;
 	const char *vehicle_name = SERVER_DEFAULT_VEHICLE;
 	const char *assets = NULL;
+	const char *human_name = NULL;
 	long drones = -1;
 	long matches = 1;
 	long max_ticks = 0;
@@ -237,6 +264,13 @@ main(int argc, char *argv[])
 			maze_name = argv[++i];
 		} else if (!strcmp(a, "--vehicle") && has_next) {
 			vehicle_name = argv[++i];
+		} else if (!strcmp(a, "--human") && has_next) {
+			human_name = argv[++i];
+			if (human_name[0] == '\0') {
+				fprintf(stderr, "%s: --human needs a non-empty name\n",
+						prog);
+				return 2;
+			}
 		} else if (!strcmp(a, "--assets") && has_next) {
 			assets = argv[++i];
 		} else if (!strcmp(a, "--drones") && has_next) {
@@ -352,15 +386,21 @@ main(int argc, char *argv[])
 	settings.mdesc = &mdesc[mdesc_index];
 	settings.si.game = settings.mdesc->type;
 
-	if (drones < 1) {
+	if (drones < 1 && human_name == NULL) {
 		fprintf(stderr, "%s: at least one local drone is required to run a "
-				"match\n", prog);
+				"match (or pass --human NAME)\n", prog);
 		return 2;
 	}
-	server_build_combatants((int) drones, vdesc_index);
+	if (human_name != NULL && drones + 1 > SERVER_RELEASE_MAX_VEHICLES) {
+		fprintf(stderr, "%s: at most %d vehicles are supported\n",
+				prog, SERVER_RELEASE_MAX_VEHICLES);
+		return 2;
+	}
+	server_build_combatants((int) drones, vdesc_index, human_name);
 
-	printf("SERVER maze=%s vehicle=%s drones=%ld assets=%s seed=%u\n",
-		   maze_name, vehicle_name, drones, content_root(),
+	printf("SERVER maze=%s vehicle=%s human=%s drones=%ld assets=%s seed=%u\n",
+		   maze_name, vehicle_name,
+		   (human_name != NULL) ? human_name : "-", drones, content_root(),
 		   cfg->seed_set ? cfg->seed : 0);
 
 	for (i = 0; i < matches; i++) {
