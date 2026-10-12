@@ -14,6 +14,13 @@ add_executable(xtank-client
     model.c
     world_render.c
     input.c
+    session_client.c
+    frame.c
+    hud.c
+    map.c
+    radar.c
+    menu.c
+    "${CMAKE_SOURCE_DIR}/Transport/enet_transport.c"
     "${CMAKE_SOURCE_DIR}/Protocol/encode.c"
     "${CMAKE_SOURCE_DIR}/Protocol/decode.c"
     "${CMAKE_SOURCE_DIR}/Protocol/content-manifest.c"
@@ -21,6 +28,7 @@ add_executable(xtank-client
 
 target_include_directories(xtank-client PRIVATE
     "${CMAKE_SOURCE_DIR}/Protocol"
+    "${CMAKE_SOURCE_DIR}/Transport"
     "${CMAKE_SOURCE_DIR}/Client"
 )
 
