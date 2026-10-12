@@ -1,0 +1,9 @@
+name=xtank-client
+binary=bin/xtank-client.exe
+binary_sha256=2f9254f39d361a6b7d185d56a2943840c2543520585c705109f45f0dc146edba
+sdl3_dll=bin/SDL3.dll
+sdl3_dll_sha256=4659d5a1e240e7d58fb92808f84afeb53395818cec62385d4796b72977a7d859
+asset_bundle=assets/xtank-assets.bin
+asset_sha256=9141e3b99ad01a2eba7f9c9345dbd0497bc780d61c201407bb558c4c9cda7e81
+fixtures=16
+platform=windows-x86_64

@@ -1,0 +1,36 @@
+XTANK-CLIENT-ASSETS v1
+bundle /tmp/opencode/xtank-phase2/p2.16/gate/dist/client/build/assets/xtank-assets.bin
+header_bytes 64
+payload_bytes 180274
+payload_fnv1a 03358bb1
+counts vehicle 14 turret 1 explosion 10 bullet 25 landmark 3 random 3 palette 11 font 5
+vehicle 0 lightc pics 16
+vehicle 1 trike pics 16
+vehicle 2 hexo pics 16
+vehicle 3 spider pics 16
+vehicle 4 psycho pics 16
+vehicle 5 tornado pics 16
+vehicle 6 marauder pics 16
+vehicle 7 tiger pics 16
+vehicle 8 rhino pics 16
+vehicle 9 medusa pics 16
+vehicle 10 delta pics 16
+vehicle 11 disk pics 16
+vehicle 12 malice pics 16
+vehicle 13 panzy pics 16
+color 0 Black 0 0 0
+color 1 White 255 255 255
+color 2 Red 255 0 0
+color 3 #ffa144 255 161 68
+color 4 Yellow 255 255 0
+color 5 Green 0 255 0
+color 6 #879dff 135 157 255
+color 7 orchid 218 112 214
+color 8 grey71 181 181 181
+color 9 cyan 0 255 255
+color 10 White 255 255 255
+font 0 -misc-fixed-medium-r-*-*-8-* 0 8 6
+font 1 6x10 6 10 8
+font 2 *-courier-bold-r-*-14-* 8 14 11
+font 3 *-courier-bold-r-*-18-* 9 18 14
+font 4 *-courier-bold-r-*-24-* 12 24 19

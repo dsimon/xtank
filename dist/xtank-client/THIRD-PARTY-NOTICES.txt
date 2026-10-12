@@ -1,0 +1,10 @@
+Xtank Windows client -- bundled third-party components
+
+SDL3 (https://libsdl.org)          zlib license.  Bundled as bin/SDL3.dll;
+                                   license in licenses/SDL3-LICENSE.
+ENet (https://enet.bespin.org)     MIT license.  Statically linked into
+                                   bin/xtank-client.exe; license in
+                                   licenses/ENet-LICENSE.
+
+The original Xtank source and content are distributed under the terms in
+COPYRIGHT and COPYRIGHT.notes.
