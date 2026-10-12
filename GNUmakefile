@@ -102,6 +102,23 @@ phase2-client-win:
 phase2-client-clean:
 	rm -rf $(XTK_CLIENT_BUILD)
 
+# ---------------------------------------------------------------------------
+# P2.16 -- Phase 2 exit gate.  Runs every Phase 2 acceptance driver (P2.2-P2.15)
+# and builds/verifies the Windows client and Ubuntu server release archives.
+# The full Phase 1 exit gate is included with PHASE2_WITH_PHASE1=1.  The native
+# Windows runtime proof and owner solo sign-off are separate exit requirements.
+#
+# Usage: make phase2-check [PHASE2_WITH_PHASE1=1]
+# ---------------------------------------------------------------------------
+PHASE2_EVIDENCE ?= /tmp/opencode/xtank-phase2/p2.16/gate
+PHASE2_WITH_PHASE1 ?= 0
+
+phase2-check:
+	@args=""; \
+	if [ "$(PHASE2_WITH_PHASE1)" = "1" ]; then args="--with-phase1"; fi; \
+	XTANK_P2_EVIDENCE="$(PHASE2_EVIDENCE)" \
+	  bash Tests/phase2/phase2-check.sh $$args
+
 .PHONY: all clean install phase1-headless phase1-server phase1-core \
 	phase1-check phase2-client-linux phase2-client-win \
-	phase2-client-clean ${SUBDIR}
+	phase2-client-clean phase2-check ${SUBDIR}
