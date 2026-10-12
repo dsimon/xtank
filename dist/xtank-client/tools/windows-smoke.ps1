@@ -105,7 +105,7 @@ function Get-PeImports([string] $path) {
     $names = @()
     $d = RvaToOffset -Bytes $bytes -Sections $sections -Rva $importRva
     while ($true) {
-        $nameRva = [BitConverter]::ToUInt32($bytes, $d)
+        $nameRva = [BitConverter]::ToUInt32($bytes, $d + 12)  # IMAGE_IMPORT_DESCRIPTOR.Name is at +12, not +0
         $firstThunk = [BitConverter]::ToUInt32($bytes, $d + 16)
         if ($nameRva -eq 0 -and $firstThunk -eq 0) { break }
         $no = RvaToOffset -Bytes $bytes -Sections $sections -Rva $nameRva
