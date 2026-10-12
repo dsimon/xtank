@@ -14,28 +14,36 @@ and session management on top of it, rather than rewriting the game.
 
 ## Current status
 
-**Phase 1 is complete on the `windows-phase1` branch.** The authoritative
-simulation has been extracted from the X11 game into a headless Linux server
-core and proven **byte-identical** to a frozen pinned X reference across every
-scenario — no gameplay rule was changed.
+**Phases 1 and 2 are complete on the `windows-phase1` branch.** Phase 1
+extracted the authoritative simulation into a headless Linux server core,
+proven **byte-identical** to a frozen pinned X reference. Phase 2 built the
+native Windows client and the single-client vertical slice on top of it —
+protocol, transport, session, rendering, input, HUD, and a playable
+integration — with the frozen simulation unchanged throughout.
 
-Phase 1 delivered:
+Phase 2 delivered:
 
-- A display-free **headless server core** (`server_core.c`, `server_loop.c`,
-  `intent.c`, `geometry.c`) with an explicit match/player lifecycle, seed,
-  game clock and RNG.
-- A monotonic **15 Hz fixed-step loop**, decoupled from rendering.
-- A neutral **graphics backend contract** (`Src/Include/graphics_backend.h`) so
-  the simulation never touches X11 types, plus a genuine no-op null backend.
-- A bounded **intent queue** (`Src/Include/intent.h`) carrying player input
-  into the simulation once per tick, ready for a future network source.
-- Display-free **content/config loading** from an explicit asset root, and a
-  terminal-free, relocatable **local server** (`Src/xtank-server`).
-- A **CI exit gate** (`make phase1-check`) plus the frozen regression oracle.
+- A versioned binary **protocol v1** (`docs/PROTOCOL-v1.md`, `Protocol/`):
+  32-octet envelope, 3 channels, explicit ops, SHA-256 content identity,
+  16 golden wire fixtures.
+- A portable, allocation-free **codec** and a nonblocking **ENet transport**
+  with input admission (ownership/finite/range validation, dedup, acks).
+- A **solo lobby and network-server path** (`Src/server_session.c`):
+  handshake → lobby → running → results → lobby, allowlisted content,
+  first-peer admin, one peer + one drone, 2-second solo abort.
+- A **Windows x64 client** (C + SDL3 3.4.18, MinGW-w64): snapshot-driven
+  renderer with the original tank art, one-tick interpolation at 60 FPS,
+  input controller, HUD/mapper/radar/menus, and a live playable frame loop.
+- A **network-path parity audit**: frozen X, direct, and network legs are
+  byte-identical over 800 ticks.
+- An **exit gate** (`make phase2-check`): all 13 acceptance drivers green,
+  plus client/server packages.
 
-There is **no network protocol, transport, session service, or Windows client
-yet** — those are Phases 2–3 by the approved scope. Windows-hosted server and
-fibers are deferred by the Linux-only MVP decision.
+The old "no network protocol, transport, session service, or Windows client
+yet" line is retired — those now exist. **Outstanding:** native Windows 11
+runtime proof (`Tests/phase2/windows-smoke.ps1` is ready for a real machine)
+and owner solo-play sign-off. Windows-hosted server and fibers remain
+deferred by the Linux-only MVP decision.
 
 See [PHASE1-REPORT.md](PHASE1-REPORT.md) for the full exit report, frozen
 oracle hashes, and per-task results.
@@ -139,14 +147,16 @@ simulation difference.
 The full scope and rationale are in [docs/PORT-SCOPE.md](docs/PORT-SCOPE.md)
 and [docs/DECISIONS.md](docs/DECISIONS.md).
 
-- **Phase 2 — Windows client and single-client vertical slice:** define
-  versioned commands/snapshots/events and content IDs, build the Windows
-  frontend on a native rendering/input layer, and connect one Windows client to
-  the headless Linux server.
-- **Phase 3 — Two-PC multiplayer MVP:** direct-connect LAN play with sessions,
-  sequenced inputs, snapshot interpolation, lifecycle and disconnect handling,
-  and Windows hosting. The MVP targets Combat mode, supplied content, Windows
-  11 clients, and a Linux authoritative server first.
+- **Phase 2 — Windows client and single-client vertical slice:** ✅ complete
+  (2026-10-12). Versioned protocol, ENet transport, solo lobby, Windows
+  client with renderer/input/HUD, playable integration, parity audit, exit
+  gate. See [docs/PHASE2-REPORT.md](docs/PHASE2-REPORT.md).
+- **Phase 3 — Two-PC multiplayer MVP:** two humans / 0–2 drones, four-vehicle
+  acceptance, admin transfer, mid-match departures without kill credit, lobby
+  rejoin, 30-minute impairment matrix, two-PC release acceptance. Direct-connect
+  LAN play with sessions, sequenced inputs, snapshot interpolation, lifecycle
+  and disconnect handling. The MVP targets Combat mode, supplied content,
+  Windows 11 clients, and a Linux authoritative server first.
 
 ## License
 
