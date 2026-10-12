@@ -9,7 +9,11 @@ Xtank is a 1988-era X11 multiplayer tank game. This repository is the
 **Windows modernization effort**. Phase 1 is **complete on branch
 `windows-phase1`**: the authoritative simulation has been extracted from the
 X11 game into a headless Linux server core, proven byte-identical to a frozen
-pinned X reference.
+pinned X reference. Phase 2 is **complete (2026-10-12)**: the native Windows
+client and single-client vertical slice — protocol v1, ENet transport, solo
+lobby/session, snapshot-driven renderer, input, HUD/map/radar, playable
+integration, parity audit, exit gate — with the frozen simulation unchanged.
+See `docs/PHASE2-REPORT.md`.
 
 The tree builds three binaries from one source base:
 
@@ -19,7 +23,8 @@ The tree builds three binaries from one source base:
 
 No network protocol, transport, session service, or Windows client exists yet;
 those are Phases 2–3. Windows-hosted server/fibers are deferred by the
-approved Linux-only MVP.
+approved Linux-only MVP. (Phase 2 has since delivered all of these; this line
+is kept for historical context on the Phase 1 tree.)
 
 Authoritative docs: `docs/PORT-SCOPE.md`, `docs/PHASE1-PLAN.md`,
 `PHASE1-REPORT.md`, plus `docs/DECISIONS.md`, `docs/PHASE0-BRIEF.md`,
@@ -193,10 +198,9 @@ source. The headless oracle (`Src/xtank-headless`) uses the legacy CLI
 Bundle the shipped server with `Bin/package-server.sh` (installs
 `bin/xtank-server` plus `share/xtank/`); verified by `Tests/phase1/package.sh`.
 
-## What Phases 2–3 build on
+## What Phase 3 builds on
 
-The seams Phase 2 (network protocol/transport/session service) and Phase 3
-(Windows client/front-end) are expected to use:
+Phase 2 is complete. The seams Phase 3 (two-PC multiplayer MVP) uses:
 
 - `Src/Include/server.h` — match/lifecycle core: `ServerConfig`,
   `ServerPlayers`, `server_config*`, `server_init`, `server_match_init`,
