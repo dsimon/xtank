@@ -18,6 +18,26 @@
 
 typedef struct ClientPlatform ClientPlatform;
 
+/*
+ * One ordered input event captured by client_platform_pump(), for the live
+ * frame loop.  Physical SDL scancodes/buttons are already mapped to the
+ * neutral XtkControl vocabulary, so Client/frame.c never sees SDL.
+ */
+enum {
+	CLIENT_IN_KEY = 1,	/* `control`/`down` from a key           */
+	CLIENT_IN_BUTTON,	/* `control`/`down`/`x`/`y` from a mouse */
+	CLIENT_IN_MOTION,	/* `x`/`y` pointer motion                 */
+	CLIENT_IN_FOCUS		/* `focused`                              */
+};
+
+typedef struct {
+	int   type;		/* CLIENT_IN_*                            */
+	int   control;		/* XtkControl for KEY/BUTTON              */
+	int   down;		/* press/release for KEY/BUTTON           */
+	float x, y;		/* logical window points (MOTION/BUTTON)  */
+	int   focused;		/* CLIENT_IN_FOCUS                        */
+} ClientInputEvent;
+
 /* Event/timer/drawable state accumulated by client_platform_pump(). */
 typedef struct {
 	int   quit;			/* SDL_EVENT_QUIT or close request seen   */
@@ -92,6 +112,20 @@ void client_platform_mouse(const ClientPlatform *p, float *x, float *y);
 /* Push a synthetic key event; `down` selects KEY_DOWN vs KEY_UP. */
 void client_platform_inject_key(ClientPlatform *p, int sdl_keycode, int down);
 
+/*
+ * Push a synthetic key event carrying an SDL scancode, so it maps to an
+ * XtkControl and appears in the input-event queue (the keycode-only injector
+ * above exists for the platform self-test).
+ */
+void client_platform_inject_scancode(ClientPlatform *p, int scancode, int down);
+
+/*
+ * Pop one captured input event (oldest first).  Returns 1 and fills `out`, or 0
+ * when the queue is empty.  The queue is refilled by client_platform_pump()
+ * and bounded (oldest events are dropped if the loop falls behind).
+ */
+int client_platform_input_pop(ClientPlatform *p, ClientInputEvent *out);
+
 /* Push a synthetic mouse-motion event at logical window coordinates. */
 void client_platform_inject_mouse_motion(ClientPlatform *p, float x, float y);
 
@@ -107,6 +141,13 @@ void client_platform_inject_focus(ClientPlatform *p, int focused);
 
 /* Draw one full frame (clear + simple placeholder geometry) and present. */
 void client_platform_render(ClientPlatform *p);
+
+/*
+ * Present an application-drawn ARGB surface (the frame loop's target) to the
+ * window.  Creates/updates an internal streaming texture as needed.  `surf` is
+ * the same SDL_Surface handed to frame_create()/frame_set_surface().
+ */
+void client_platform_present(ClientPlatform *p, struct SDL_Surface *surf);
 
 /* Monotonic nanoseconds since an arbitrary epoch (SDL_GetTicksNS). */
 uint64_t client_platform_ticks_ns(void);
