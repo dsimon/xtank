@@ -33,6 +33,13 @@
 #include "wire.h"
 #include "limits.h"
 #include "content-manifest.h"
+#include "hud.h"
+#include "map.h"
+#include "radar.h"
+#include "menu.h"
+#include "render.h"
+#include "session_client.h"
+#include "frame.h"
 
 #define XTK_CLIENT_BUILD 0x0001
 
@@ -559,6 +566,270 @@ static void check_drawable_scale(const char *label, int lw, int lh, int dw,
 	       xtk_dpi_logical_to_drawable(lh, scale));
 }
 
+/* ---- P2.13 UI self-test and screenshot demo -------------------------- */
+
+/* Append one scene's primitives onto another (order preserved). */
+static void scene_merge(XtkUiScene *dst, const XtkUiScene *src)
+{
+	int i;
+
+	for (i = 0; i < src->rect_count; i++) {
+		const XtkUiRect *r = &src->rect[i];
+		ui_add_rect(dst, r->x, r->y, r->w, r->h, r->color, r->filled);
+	}
+	for (i = 0; i < src->line_count; i++) {
+		const XtkUiLine *l = &src->line[i];
+		ui_add_line(dst, l->x1, l->y1, l->x2, l->y2, l->color);
+	}
+	for (i = 0; i < src->text_count; i++) {
+		const XtkUiText *t = &src->text[i];
+		ui_add_text_align(dst, t->x, t->y, (XtkUiFont)t->font, t->color,
+				  t->align, t->text);
+	}
+}
+
+/* A representative authorized match snapshot for the demo/screenshot. */
+static void ui_demo_snapshot(XtkViewSnapshot *v, XtkSelfState *self)
+{
+	memset(v, 0, sizeof(*v));
+	v->server_tick = 321;
+	v->own_slot = 0;
+	v->own_generation = 1;
+	v->vehicle_count = 2;
+	v->vehicle[0].slot = 0;
+	v->vehicle[0].generation = 1;
+	v->vehicle[0].kind = 6;
+	v->vehicle[0].x = 480.0;
+	v->vehicle[0].y = 400.0;
+	v->vehicle[1].slot = 1;
+	v->vehicle[1].generation = 1;
+	v->vehicle[1].kind = 6;
+	v->vehicle[1].x = 700.0;
+	v->vehicle[1].y = 520.0;
+	v->map_cell_count = 3;
+	v->cell[0].grid_x = 1;
+	v->cell[0].grid_y = 1;
+	v->cell[0].flags = XTK_MAPCELL_KNOWN | XTK_MAPCELL_NORTH_WALL |
+			   XTK_MAPCELL_WEST_WALL;
+	v->cell[1].grid_x = 2;
+	v->cell[1].grid_y = 2;
+	v->cell[1].flags = XTK_MAPCELL_KNOWN | XTK_MAPCELL_NORTH_WALL |
+			   XTK_MAPCELL_NORTH_DEST;
+	v->cell[2].grid_x = 3;
+	v->cell[2].grid_y = 3;
+	v->cell[2].flags = XTK_MAPCELL_KNOWN | XTK_MAPCELL_TEAM_KNOWN;
+	v->cell[2].type = 3;
+	v->radar_blip_count = 2;
+	v->radar[0].x = 20;
+	v->radar[0].y = 20;
+	v->radar[0].age = 0;
+	v->radar[1].x = 60;
+	v->radar[1].y = 40;
+	v->radar[1].age = 9;
+	v->weapon_count = 3;
+
+	memset(self, 0, sizeof(*self));
+	self->slot = 0;
+	self->generation = 1;
+	self->lifecycle_flags = XTK_SELF_ALIVE;
+	self->armor[0] = 90;
+	self->armor[1] = 75;
+	self->armor[2] = 60;
+	self->armor[3] = 45;
+	self->fuel = 820;
+	self->heat = 14;
+	self->score = 750;
+	self->weapon_count = 3;
+	self->weapon_enabled_bitmap = 0x07;
+	self->ammo[0] = 25;
+	self->ammo[1] = 12;
+	self->ammo[2] = 0;
+	self->reload[0] = 3;
+	self->reload[1] = 7;
+	self->reload[2] = 0;
+}
+
+static void run_ui_selftest(void)
+{
+	XtkSelfState self;
+	XtkHudInfo info;
+	XtkUiScene s;
+	XtkResultsState rs;
+	int refcount;
+	const char *const *ref;
+
+	memset(&self, 0, sizeof(self));
+	self.lifecycle_flags = XTK_SELF_ALIVE;
+	self.armor[0] = 17;
+	self.armor[1] = 18;
+	self.armor[2] = 19;
+	self.armor[3] = 20;
+	self.fuel = 321;
+	self.heat = 9;
+	self.score = 77;
+	self.weapon_count = 1;
+	self.weapon_enabled_bitmap = 0x01;
+	self.ammo[0] = 4;
+	self.reload[0] = 2;
+	memset(&info, 0, sizeof(info));
+	info.connected = 1;
+
+	check(hud_build(&self, 1, &info, &s) == 0, "ui: hud_build");
+	check(ui_scene_has_text(&s, "321"), "ui: hud fuel value shown");
+	check(ui_scene_has_text(&s, "77"), "ui: hud score value shown");
+	check(ui_scene_has_text(&s, "17") && ui_scene_has_text(&s, "20"),
+	      "ui: hud armor shown");
+	check(!ui_scene_has_text(&s, "pilot"), "ui: hud has no player name");
+
+	/* The lobby reproduces the frozen reference entry texts. */
+	ref = menu_reference_main_entries(&refcount);
+	check(refcount == 11 && strcmp(ref[0], "Play") == 0 &&
+	      strcmp(ref[10], "Quit") == 0, "ui: reference main-menu texts");
+
+	/* Results/banner carry the public names from the server DTO. */
+	menu_results_init(&rs);
+	rs.have_results = 1;
+	rs.results.end_tick = 500;
+	rs.results.result_kind = 0;
+	rs.results.winner_slot = 0;
+	rs.results.vehicle_count = 1;
+	strcpy(rs.results.entry[0].name, "pilot");
+	rs.results.entry[0].slot = 0;
+	rs.results.entry[0].score = 1000;
+	check(menu_build_results(&rs, &s) == 0, "ui: results build");
+	check(ui_scene_has_text(&s, "pilot: 1000 points"),
+	      "ui: results name + score");
+	check(ui_scene_has_text(&s, "Battle won by pilot"),
+	      "ui: results banner");
+
+	/* Render a representative match HUD/map/radar scene onto a surface and
+	 * confirm it actually paints (screenshot path). */
+	{
+		SDL_Surface *surf = SDL_CreateSurface(XTK_UI_SCREEN_W,
+						      XTK_UI_SCREEN_H,
+						      SDL_PIXELFORMAT_ARGB8888);
+		check(surf != NULL, "ui: create surface");
+		if (surf != NULL) {
+			XtkViewSnapshot v;
+			XtkUiScene hud, mp, rd;
+			int x, y, lit = 0;
+
+			ui_demo_snapshot(&v, &self);
+			hud_build(&self, 1, &info, &hud);
+			map_build(&v, &mp);
+			radar_build(&v, &rd);
+			ui_scene_init(&s);
+			scene_merge(&s, &hud);
+			scene_merge(&s, &mp);
+			scene_merge(&s, &rd);
+			check(render_frame_ui(&s, surf) == 0, "ui: render match");
+			for (y = XTK_UI_CONS_Y + 5; y < XTK_UI_CONS_Y + 40; y++) {
+				for (x = XTK_UI_CONS_X + 5;
+				     x < XTK_UI_CONS_X + 120; x++) {
+					if (render_surface_get(surf, x, y) !=
+					    XTK_RGB(0x10, 0x14, 0x18)) {
+						lit++;
+					}
+				}
+			}
+			check(lit > 0, "ui: HUD text painted pixels");
+			SDL_DestroySurface(surf);
+		}
+	}
+}
+
+/* Write representative lobby and match frames as BMPs for owner review. */
+static void run_ui_shot(const char *dir)
+{
+	SDL_Surface *surf;
+	XtkViewSnapshot v;
+	XtkSelfState self;
+	XtkHudInfo info;
+	XtkUiScene s, part;
+	XtkLobbyState ls;
+	XtkResultsState rs;
+	char path[1024];
+
+	surf = SDL_CreateSurface(XTK_UI_SCREEN_W, XTK_UI_SCREEN_H,
+				 SDL_PIXELFORMAT_ARGB8888);
+	if (surf == NULL) {
+		printf("UI-SHOT FAIL (surface)\n");
+		return;
+	}
+
+	ui_demo_snapshot(&v, &self);
+	memset(&info, 0, sizeof(info));
+	info.connected = 1;
+
+	/* Match frame: world is drawn separately (P2.14); here HUD/map/radar. */
+	ui_scene_init(&s);
+	hud_build(&self, 1, &info, &part);
+	scene_merge(&s, &part);
+	map_build(&v, &part);
+	scene_merge(&s, &part);
+	radar_build(&v, &part);
+	scene_merge(&s, &part);
+	render_frame_ui(&s, surf);
+	snprintf(path, sizeof(path), "%s/ui_match.bmp", dir);
+	SDL_SaveBMP(surf, path);
+
+	/* High-DPI (200%) variant of the same logical match scene. */
+	{
+		SDL_Surface *hi = SDL_CreateSurface(XTK_UI_SCREEN_W * 2,
+						    XTK_UI_SCREEN_H * 2,
+						    SDL_PIXELFORMAT_ARGB8888);
+		if (hi != NULL) {
+			render_frame_ui_scaled(&s, hi, 2);
+			snprintf(path, sizeof(path), "%s/ui_match_2x.bmp",
+				 dir);
+			SDL_SaveBMP(hi, path);
+			SDL_DestroySurface(hi);
+		}
+	}
+
+	/* Lobby frame with a synthetic catalog and a 3-player result. */
+	menu_lobby_init(&ls);
+	ls.connected = 1;
+	ls.is_admin = 1;
+	ls.have_catalog = 1;
+	ls.num_mazes = 2;
+	strcpy(ls.maze[0], "combat1");
+	ls.maze_id[0] = 0x0101;
+	strcpy(ls.maze[1], "Arena");
+	ls.maze_id[1] = 0x0102;
+	ls.num_vehicles = 1;
+	strcpy(ls.vehicle[0], "Vanguard");
+	ls.vehicle_id[0] = 0x0201;
+	ls.selected_maze_id = 0x0101;
+	ls.selected_vehicle_id = 0x0201;
+	menu_build_lobby(&ls, &s);
+	render_frame_ui(&s, surf);
+	snprintf(path, sizeof(path), "%s/ui_lobby.bmp", dir);
+	SDL_SaveBMP(surf, path);
+
+	menu_results_init(&rs);
+	rs.have_results = 1;
+	rs.results.end_tick = 4004;
+	rs.results.result_kind = 0;
+	rs.results.winner_slot = 2;
+	rs.results.vehicle_count = 3;
+	strcpy(rs.results.entry[0].name, "alpha");
+	rs.results.entry[0].score = 300;
+	strcpy(rs.results.entry[1].name, "bravo");
+	rs.results.entry[1].score = 450;
+	strcpy(rs.results.entry[2].name, "charlie");
+	rs.results.entry[2].slot = 2;
+	rs.results.entry[2].score = 1000;
+	menu_build_results(&rs, &s);
+	render_frame_ui(&s, surf);
+	snprintf(path, sizeof(path), "%s/ui_results.bmp", dir);
+	SDL_SaveBMP(surf, path);
+
+	SDL_DestroySurface(surf);
+	printf("UI-SHOT PASS (%s/ui_lobby.bmp ui_match.bmp ui_results.bmp)\n",
+	       dir);
+}
+
 static void run_self_test(int logical_w, int logical_h)
 {
 	ClientPlatform *p;
@@ -587,6 +858,7 @@ static void run_self_test(int logical_w, int logical_h)
 
 	run_dpi_math();
 	run_input_selftest();
+	run_ui_selftest();
 
 	/*
 	 * Drain the OS startup events (window shown/focus/enter and an initial
@@ -773,12 +1045,157 @@ static void run_connect(const char *spec, const char *fixdir)
 	exit(got_welcome ? 0 : 1);
 }
 
+/* ---- playable mode (P2.14) ------------------------------------------- */
+
+/* Feed the bounded platform input queue into the frame loop. */
+static void deliver_platform_input(XtkFrame *fr, ClientPlatform *p)
+{
+	ClientInputEvent ie;
+	float scale = 1.0f;
+	int lw, lh, dw, dh;
+
+	client_platform_metrics(p, &lw, &lh, &dw, &dh, &scale);
+	while (client_platform_input_pop(p, &ie)) {
+		switch (ie.type) {
+		case CLIENT_IN_KEY:
+		case CLIENT_IN_BUTTON:
+			frame_control(fr, (XtkControl)ie.control, ie.down);
+			break;
+		case CLIENT_IN_MOTION:
+			frame_aim_screen(fr, ie.x, ie.y, scale);
+			break;
+		case CLIENT_IN_FOCUS:
+			frame_focus(fr, ie.focused);
+			break;
+		default:
+			break;
+		}
+	}
+}
+
+static void run_play(const char *spec, const char *assets_path)
+{
+	char host[256];
+	int port = 0;
+	const char *colon;
+	ClientPlatform *p;
+	SDL_Surface *surf;
+	XtkAssets assets;
+	int have_assets = 0;
+	XtkSessionClient *sc;
+	XtkFrame *fr;
+	ClientEvents ev;
+	XtkFrameStats st;
+	uint64_t last_log = 0;
+	int i;
+
+	colon = strrchr(spec, ':');
+	if (colon == NULL || (size_t)(colon - spec) >= sizeof(host)) {
+		printf("PLAY FAIL (address must be HOST:PORT)\n");
+		exit(1);
+	}
+	memcpy(host, spec, (size_t)(colon - spec));
+	host[colon - spec] = '\0';
+	port = atoi(colon + 1);
+
+	p = client_platform_create("Xtank", XTK_UI_SCREEN_W, XTK_UI_SCREEN_H);
+	if (p == NULL) {
+		printf("PLAY FAIL (no platform)\n");
+		exit(1);
+	}
+	surf = SDL_CreateSurface(XTK_UI_SCREEN_W, XTK_UI_SCREEN_H,
+				 SDL_PIXELFORMAT_ARGB8888);
+	if (surf == NULL) {
+		printf("PLAY FAIL (no surface)\n");
+		client_platform_destroy(p);
+		exit(1);
+	}
+	if (assets_path != NULL) {
+		char err[128];
+		if (assets_load_file(&assets, assets_path, err, sizeof(err)) == 0) {
+			have_assets = 1;
+		} else {
+			printf("note: asset bundle not loaded (%s)\n", err);
+		}
+	}
+
+	sc = session_client_create();
+	if (sc == NULL ||
+	    session_client_connect(sc, host, (uint16_t)port, "pilot") != 0) {
+		printf("PLAY FAIL (cannot connect to %s:%d)\n", host, port);
+		SDL_DestroySurface(surf);
+		client_platform_destroy(p);
+		exit(1);
+	}
+	fr = frame_create(sc, have_assets ? &assets : NULL, surf);
+	if (fr == NULL) {
+		printf("PLAY FAIL (no frame state)\n");
+		exit(1);
+	}
+	printf("PLAY CONNECTING %s:%d\n", host, port);
+
+	memset(&ev, 0, sizeof(ev));
+	for (;;) {
+		uint64_t now;
+
+		client_platform_pump(p, &ev);
+		deliver_platform_input(fr, p);
+		if (ev.quit) {
+			(void)frame_request_quit(fr);
+		}
+		if (frame_quit_requested(fr)) {
+			break;
+		}
+
+		now = client_platform_ticks_ns();
+		frame_tick(fr, now);
+		client_platform_present(p, surf);
+
+		frame_stats(fr, &st);
+		if (st.session_state == XTK_SC_FAILED) {
+			printf("PLAY FAIL (0x%04x %s)\n",
+			       (unsigned)st.last_error,
+			       session_client_error_text(sc));
+			break;
+		}
+		if (now - last_log > 1000000000ULL) {
+			printf("PLAY state=%d tick=%d snaps=%d emitted=%d\n",
+			       (int)st.session_state, st.server_tick,
+			       st.snapshots, st.emitted_batches);
+			last_log = now;
+		}
+		client_platform_delay(5);
+	}
+
+	/* Clean disconnect: pump until the transport drops the peer. */
+	for (i = 0; i < 200 &&
+	     session_client_state(sc) != XTK_SC_DISCONNECTED; i++) {
+		frame_tick(fr, client_platform_ticks_ns());
+		client_platform_present(p, surf);
+		client_platform_delay(5);
+	}
+	frame_stats(fr, &st);
+	printf("PLAY %s (state=%d)\n",
+	       (st.last_error == 0 && st.rejected == 0) ? "DONE" : "ENDED",
+	       (int)st.session_state);
+
+	frame_destroy(fr);
+	session_client_destroy(sc);
+	if (have_assets) {
+		assets_free(&assets);
+	}
+	SDL_DestroySurface(surf);
+	client_platform_destroy(p);
+}
+
 /* ---- argument parsing ----------------------------------------------- */
 
 static void usage(const char *argv0)
 {
 	printf("usage: %s [--self-test] [--frames N] [--connect HOST:PORT]\n"
-	       "          [--fixtures DIR] [--logical WxH]\n", argv0);
+	       "          [--play HOST:PORT] [--assets FILE] [--fixtures DIR]\n"
+	       "          [--logical WxH] [--ui-demo DIR]\n",
+	       argv0);
 }
 
 int main(int argc, char **argv)
@@ -788,6 +1205,9 @@ int main(int argc, char **argv)
 	int logical_w = 1024, logical_h = 768;
 	int self_test = 0;
 	const char *connect_spec = NULL;
+	const char *play_spec = NULL;
+	const char *assets_path = NULL;
+	const char *ui_demo_dir = NULL;
 	int i;
 
 	for (i = 1; i < argc; ++i) {
@@ -797,8 +1217,14 @@ int main(int argc, char **argv)
 			frames = atoi(argv[++i]);
 		} else if (strcmp(argv[i], "--connect") == 0 && i + 1 < argc) {
 			connect_spec = argv[++i];
+		} else if (strcmp(argv[i], "--play") == 0 && i + 1 < argc) {
+			play_spec = argv[++i];
+		} else if (strcmp(argv[i], "--assets") == 0 && i + 1 < argc) {
+			assets_path = argv[++i];
 		} else if (strcmp(argv[i], "--fixtures") == 0 && i + 1 < argc) {
 			fixdir = argv[++i];
+		} else if (strcmp(argv[i], "--ui-demo") == 0 && i + 1 < argc) {
+			ui_demo_dir = argv[++i];
 		} else if (strcmp(argv[i], "--logical") == 0 && i + 1 < argc) {
 			if (sscanf(argv[++i], "%dx%d", &logical_w,
 				   &logical_h) != 2) {
@@ -812,6 +1238,18 @@ int main(int argc, char **argv)
 			usage(argv[0]);
 			return 2;
 		}
+	}
+
+	if (ui_demo_dir != NULL) {
+		SDL_Init(0);
+		run_ui_shot(ui_demo_dir);
+		SDL_Quit();
+		return 0;
+	}
+
+	if (play_spec != NULL) {
+		run_play(play_spec, assets_path);
+		return 0;
 	}
 
 	if (connect_spec != NULL) {
