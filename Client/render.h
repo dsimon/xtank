@@ -179,6 +179,24 @@ int world_render_present(const XtkAssets *a, const XtkViewSnapshot *v,
 			 const XtkCamera *cam, struct SDL_Surface *surf,
 			 char *err, size_t errcap);
 
+/*
+ * P2.13 UI scene painting: rasterize the text/rectangle/line primitives built
+ * by hud.c/map.c/radar.c/menu.c onto an ARGB surface.  The scene type is
+ * declared in Client/ui.h (included by render_sdl.c); it is only forward
+ * declared here so render.h stays free of the UI panel types.
+ */
+struct XtkUiScene;
+int render_fill_rect(struct SDL_Surface *surf, int x, int y, int w, int h,
+		     uint32_t color);
+int render_draw_line(struct SDL_Surface *surf, int x1, int y1, int x2, int y2,
+		     uint32_t color);
+int render_draw_text(struct SDL_Surface *surf, int x, int y, const char *text,
+		     int scale, uint32_t color);
+int render_frame_ui(const struct XtkUiScene *scene, struct SDL_Surface *surf);
+/* Same, with every logical coordinate multiplied by `scale` (host DPI). */
+int render_frame_ui_scaled(const struct XtkUiScene *scene,
+			   struct SDL_Surface *surf, int scale);
+
 /* Low-level surface primitives.  DRAW_XOR is a true per-channel XOR, matching
  * the legacy X11 GXxor semantics for opaque 1-bit stencils. */
 #define XTK_DRAW_COPY 0
