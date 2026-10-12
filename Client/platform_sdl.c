@@ -19,10 +19,38 @@
 
 #include "platform_sdl.h"
 
+#define CLIENT_INPUT_QUEUE 64
+
 struct ClientPlatform {
 	SDL_Window   *window;
 	SDL_Renderer *renderer;
+	SDL_Texture  *texture;		/* present target for the frame loop */
+	int           tex_w, tex_h;
+
+	ClientInputEvent inq[CLIENT_INPUT_QUEUE];
+	int inq_head, inq_count;
 };
+
+static void inq_push(ClientPlatform *p, const ClientInputEvent *e)
+{
+	if (p->inq_count >= CLIENT_INPUT_QUEUE) {
+		p->inq_head = (p->inq_head + 1) % CLIENT_INPUT_QUEUE;
+		p->inq_count--;
+	}
+	p->inq[(p->inq_head + p->inq_count) % CLIENT_INPUT_QUEUE] = *e;
+	p->inq_count++;
+}
+
+int client_platform_input_pop(ClientPlatform *p, ClientInputEvent *out)
+{
+	if (p == NULL || out == NULL || p->inq_count <= 0) {
+		return 0;
+	}
+	*out = p->inq[p->inq_head];
+	p->inq_head = (p->inq_head + 1) % CLIENT_INPUT_QUEUE;
+	p->inq_count--;
+	return 1;
+}
 
 /*
  * Physical SDL scancode -> neutral client control.  Keeping this table here
@@ -140,6 +168,10 @@ void client_platform_destroy(ClientPlatform *p)
 	if (p == NULL) {
 		return;
 	}
+	if (p->texture != NULL) {
+		SDL_DestroyTexture(p->texture);
+		p->texture = NULL;
+	}
 	if (p->renderer != NULL) {
 		SDL_DestroyRenderer(p->renderer);
 	}
@@ -175,6 +207,9 @@ int client_platform_pump(ClientPlatform *p, ClientEvents *ev)
 	if (p == NULL || ev == NULL) {
 		return -1;
 	}
+	/* The bounded input queue is refilled each pump; frame.c drains it. */
+	p->inq_head = 0;
+	p->inq_count = 0;
 	while (SDL_PollEvent(&e)) {
 		switch (e.type) {
 		case SDL_EVENT_QUIT:
@@ -187,34 +222,88 @@ int client_platform_pump(ClientPlatform *p, ClientEvents *ev)
 		case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
 			ev->resized++;
 			break;
-		case SDL_EVENT_WINDOW_FOCUS_GAINED:
+		case SDL_EVENT_WINDOW_FOCUS_GAINED: {
+			ClientInputEvent ie;
 			ev->focus_gained++;
+			ie.type = CLIENT_IN_FOCUS;
+			ie.control = XTK_CTL_NONE;
+			ie.down = 0;
+			ie.x = ie.y = 0.0f;
+			ie.focused = 1;
+			inq_push(p, &ie);
 			break;
-		case SDL_EVENT_WINDOW_FOCUS_LOST:
+		}
+		case SDL_EVENT_WINDOW_FOCUS_LOST: {
+			ClientInputEvent ie;
 			ev->focus_lost++;
+			ie.type = CLIENT_IN_FOCUS;
+			ie.control = XTK_CTL_NONE;
+			ie.down = 0;
+			ie.x = ie.y = 0.0f;
+			ie.focused = 0;
+			inq_push(p, &ie);
 			break;
+		}
 		case SDL_EVENT_KEY_DOWN:
-			ev->key_down++;
+		case SDL_EVENT_KEY_UP: {
+			XtkControl ctl;
+			ClientInputEvent ie;
+			int down = (e.type == SDL_EVENT_KEY_DOWN) ? 1 : 0;
+
+			if (down) {
+				ev->key_down++;
+			} else {
+				ev->key_up++;
+			}
 			ev->last_key = (int)e.key.key;
 			ev->last_scancode = (int)e.key.scancode;
+			ctl = xtk_sdl_scancode_to_control((int)e.key.scancode);
+			if (ctl != XTK_CTL_NONE) {
+				ie.type = CLIENT_IN_KEY;
+				ie.control = (int)ctl;
+				ie.down = down;
+				ie.x = ie.y = 0.0f;
+				ie.focused = 0;
+				inq_push(p, &ie);
+			}
 			break;
-		case SDL_EVENT_KEY_UP:
-			ev->key_up++;
-			ev->last_key = (int)e.key.key;
-			ev->last_scancode = (int)e.key.scancode;
-			break;
-		case SDL_EVENT_MOUSE_MOTION:
+		}
+		case SDL_EVENT_MOUSE_MOTION: {
+			ClientInputEvent ie;
 			ev->mouse_motion++;
 			ev->mouse_x = e.motion.x;
 			ev->mouse_y = e.motion.y;
+			ie.type = CLIENT_IN_MOTION;
+			ie.control = XTK_CTL_NONE;
+			ie.down = 0;
+			ie.x = e.motion.x;
+			ie.y = e.motion.y;
+			ie.focused = 0;
+			inq_push(p, &ie);
 			break;
+		}
 		case SDL_EVENT_MOUSE_BUTTON_DOWN:
-		case SDL_EVENT_MOUSE_BUTTON_UP:
+		case SDL_EVENT_MOUSE_BUTTON_UP: {
+			XtkControl ctl;
+			ClientInputEvent ie;
+			int down = (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN) ? 1 : 0;
+
 			ev->mouse_button++;
 			ev->last_button = (int)e.button.button;
 			ev->mouse_x = e.button.x;
 			ev->mouse_y = e.button.y;
+			ctl = xtk_sdl_button_to_control((int)e.button.button);
+			if (ctl != XTK_CTL_NONE) {
+				ie.type = CLIENT_IN_BUTTON;
+				ie.control = (int)ctl;
+				ie.down = down;
+				ie.x = e.button.x;
+				ie.y = e.button.y;
+				ie.focused = 0;
+				inq_push(p, &ie);
+			}
 			break;
+		}
 		default:
 			break;
 		}
@@ -268,6 +357,19 @@ void client_platform_inject_key(ClientPlatform *p, int sdl_keycode, int down)
 	e.key.windowID = SDL_GetWindowID(p->window);
 	e.key.key = (SDL_Keycode)sdl_keycode;
 	e.key.scancode = SDL_SCANCODE_UNKNOWN;
+	e.key.down = down ? true : false;
+	SDL_PushEvent(&e);
+}
+
+void client_platform_inject_scancode(ClientPlatform *p, int scancode, int down)
+{
+	SDL_Event e;
+	SDL_zero(e);
+	e.type = down ? SDL_EVENT_KEY_DOWN : SDL_EVENT_KEY_UP;
+	e.key.windowID = SDL_GetWindowID(p->window);
+	e.key.scancode = (SDL_Scancode)scancode;
+	e.key.key = SDL_GetKeyFromScancode((SDL_Scancode)scancode, SDL_KMOD_NONE,
+					   false);
 	e.key.down = down ? true : false;
 	SDL_PushEvent(&e);
 }
@@ -341,6 +443,33 @@ void client_platform_render(ClientPlatform *p)
 	SDL_SetRenderDrawColor(p->renderer, 0xC8, 0xC8, 0x3C, 0xFF);
 	SDL_RenderLine(p->renderer, 0.0f, t * (float)h, (float)w, t * (float)h);
 
+	SDL_RenderPresent(p->renderer);
+}
+
+void client_platform_present(ClientPlatform *p, struct SDL_Surface *surf)
+{
+	if (p == NULL || p->renderer == NULL || surf == NULL) {
+		return;
+	}
+	if (p->texture == NULL || p->tex_w != surf->w || p->tex_h != surf->h) {
+		if (p->texture != NULL) {
+			SDL_DestroyTexture(p->texture);
+			p->texture = NULL;
+		}
+		p->texture = SDL_CreateTexture(p->renderer,
+					       SDL_PIXELFORMAT_ARGB8888,
+					       SDL_TEXTUREACCESS_STREAMING,
+					       surf->w, surf->h);
+		p->tex_w = surf->w;
+		p->tex_h = surf->h;
+	}
+	if (p->texture == NULL) {
+		return;
+	}
+	SDL_UpdateTexture(p->texture, NULL, surf->pixels, surf->pitch);
+	SDL_SetRenderDrawColor(p->renderer, 0x00, 0x00, 0x00, 0xFF);
+	SDL_RenderClear(p->renderer);
+	SDL_RenderTexture(p->renderer, p->texture, NULL, NULL);
 	SDL_RenderPresent(p->renderer);
 }
 
