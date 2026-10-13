@@ -98,6 +98,10 @@ struct ServerSession {
 
 	uint64_t last_rx_ms;
 
+	/* D3-E fair per-peer receive budget for the current tick. */
+	int rx_tick;
+	int rx_events;
+
 	uint32_t snapshot_seq;
 	int events_sent;
 
@@ -799,20 +803,40 @@ handle_reset(ServerSession *s, const XtkMessage *msg, uint64_t t)
 }
 
 static int
-handle_input(ServerSession *s, const XtkMessage *msg)
+handle_input(ServerSession *s, const XtkMessage *msg, uint8_t channel,
+	     uint64_t t)
 {
+	int accepted;
+
 	if (lobby.state != SERVER_SESSION_RUNNING ||
 	    s->net == (ServerNetSession *) NULL) {
 		emit_protocol_error(s, XTK_ERR_BAD_STATE, lobby.state,
 				    msg->env.message_type);
 		return XTK_ERR_BAD_STATE;
 	}
-	(void) server_net_admit_message(s->net, msg, frame + 1);
+
+	/* The actual transport channel is validated before any intent. */
+	if (channel != xtk_next_channel(msg->env.message_type)) {
+		emit_protocol_error(s, XTK_ERR_BAD_CHANNEL, channel,
+				    msg->env.message_type);
+		return XTK_ERR_BAD_CHANNEL;
+	}
+
+	/*
+	 * Only valid, fresh traffic counts as alive (D3-E): a saturated,
+	 * duplicate, stale, foreign or malformed batch admits nothing and must
+	 * not extend the valid-input timeout.  Heartbeats/NONE count as valid
+	 * liveness traffic without an engine effect.
+	 */
+	accepted = server_net_admit_message_on(s->net, msg, channel, frame + 1);
+	if (accepted > 0)
+		s->last_rx_ms = t;
 	return XTK_ERR_NONE;
 }
 
 int
-server_session_message(ServerSession *s, const XtkMessage *msg, uint64_t t)
+server_session_message_ch(ServerSession *s, const XtkMessage *msg,
+			  uint8_t channel, uint64_t t)
 {
 	if (s == (ServerSession *) NULL || !s->used ||
 	    msg == (const XtkMessage *) NULL || s->disconnected)
@@ -832,6 +856,10 @@ server_session_message(ServerSession *s, const XtkMessage *msg, uint64_t t)
 		return XTK_ERR_BAD_STATE;
 	}
 
+	/*
+	 * Lobby traffic only refreshes the liveness clock when it is actually
+	 * accepted; a rejected/stale message must not extend the timeout.
+	 */
 	switch (msg->env.message_type) {
 	  case XTK_MSG_PING: {
 		XtkMessage pong;
@@ -847,27 +875,52 @@ server_session_message(ServerSession *s, const XtkMessage *msg, uint64_t t)
 		return XTK_ERR_NONE;
 	  case XTK_MSG_HELLO:
 		return handle_hello(s, msg, t);
-	  case XTK_MSG_CONFIG_SELECT:
-		s->last_rx_ms = t;
-		return handle_config_select(s, msg);
-	  case XTK_MSG_READY:
-		s->last_rx_ms = t;
-		return handle_ready(s, msg);
-	  case XTK_MSG_START_REQUEST:
-		s->last_rx_ms = t;
-		return handle_start_request(s, msg, t);
-	  case XTK_MSG_RESET:
-		s->last_rx_ms = t;
-		return handle_reset(s, msg, t);
+	  case XTK_MSG_CONFIG_SELECT: {
+		int r = handle_config_select(s, msg);
+
+		if (r == XTK_ERR_NONE)
+			s->last_rx_ms = t;
+		return r;
+	  }
+	  case XTK_MSG_READY: {
+		int r = handle_ready(s, msg);
+
+		if (r == XTK_ERR_NONE)
+			s->last_rx_ms = t;
+		return r;
+	  }
+	  case XTK_MSG_START_REQUEST: {
+		int r = handle_start_request(s, msg, t);
+
+		if (r == XTK_ERR_NONE)
+			s->last_rx_ms = t;
+		return r;
+	  }
+	  case XTK_MSG_RESET: {
+		int r = handle_reset(s, msg, t);
+
+		if (r == XTK_ERR_NONE)
+			s->last_rx_ms = t;
+		return r;
+	  }
 	  case XTK_MSG_INPUT_BATCH:
 	  case XTK_MSG_RELIABLE_CMD:
-		s->last_rx_ms = t;
-		return handle_input(s, msg);
+		return handle_input(s, msg, channel, t);
 	  default:
 		emit_protocol_error(s, XTK_ERR_BAD_STATE, lobby.state,
 				    msg->env.message_type);
 		return XTK_ERR_BAD_STATE;
 	}
+}
+
+int
+server_session_message(ServerSession *s, const XtkMessage *msg, uint64_t t)
+{
+	if (msg == (const XtkMessage *) NULL)
+		return server_session_message_ch(s, msg, 0, t);
+	return server_session_message_ch(s, msg,
+					 xtk_next_channel(msg->env.message_type),
+					 t);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1277,11 +1330,16 @@ session_neutralize(ServerSession *p)
 	(void) memset(&in, 0, sizeof(in));
 	in.tick = frame + 1;
 	in.player = p->bound_slot;
-	in.sequence = 0;
+	/*
+	 * Neutralisation uses the top of the sequence space so it can never
+	 * collide with a peer's own (low, monotonically increasing) admitted
+	 * sequences, and so it is ordered last within the tick.
+	 */
+	in.sequence = 0xFFFFFFFEu;
 	in.op = INTENT_DRIVE_REL;
 	in.a = 0.0;
 	(void) intent_push(&in);
-	in.sequence = 1;
+	in.sequence = 0xFFFFFFFFu;
 	in.op = INTENT_FIRE_HOLD;
 	in.a = 0.0;
 	(void) intent_push(&in);
@@ -1382,6 +1440,9 @@ server_session_service(uint64_t t)
 	if (events < 0)
 		events = 0;
 
+	/* Fresh per-tick admission quotas and the rotating peer-first cursor. */
+	server_net_begin_tick(frame + 1);
+
 	while (transport_poll_connect(host, &p)) {
 		if (lobby.state != SERVER_SESSION_LOBBY ||
 		    n_sessions >= session_capacity) {
@@ -1397,21 +1458,37 @@ server_session_service(uint64_t t)
 			server_session_destroy(s);
 	}
 
-	for (;;) {
-		uint8_t buf[TRANSPORT_MAX_PACKET];
-		size_t len = 0;
-		uint8_t ch = 0;
-		XtkMessage msg;
-		int r = transport_receive(host, &p, buf, sizeof(buf), &len, &ch);
+	{
+		int served = 0;
+		int budget = (int) SERVER_NET_SERVICE_BUDGET;
 
-		if (r <= 0)
-			break;
-		s = session_for_peer(p);
-		if (s == (ServerSession *) NULL)
-			continue;
-		if (xtk_decode(buf, len, &msg) != XTK_ERR_NONE)
-			continue;
-		(void) server_session_message(s, &msg, t);
+		while (served < budget) {
+			uint8_t buf[TRANSPORT_MAX_PACKET];
+			size_t len = 0;
+			uint8_t ch = 0;
+			XtkMessage msg;
+			int r = transport_receive(host, &p, buf, sizeof(buf),
+						  &len, &ch);
+
+			if (r <= 0)
+				break;
+			served++;
+			s = session_for_peer(p);
+			if (s == (ServerSession *) NULL)
+				continue;
+			/* Bound one flooding peer's share of this tick; the
+			 * healthy peer is still serviced below. */
+			if (s->rx_tick != frame + 1) {
+				s->rx_tick = frame + 1;
+				s->rx_events = 0;
+			}
+			if (s->rx_events >= SERVER_NET_PEER_EVENT_QUOTA)
+				continue;
+			s->rx_events++;
+			if (xtk_decode(buf, len, &msg) != XTK_ERR_NONE)
+				continue;
+			(void) server_session_message_ch(s, &msg, ch, t);
+		}
 	}
 
 	/* Reclaim peers that quit or failed their handshake. */
