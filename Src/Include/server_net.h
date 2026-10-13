@@ -39,8 +39,36 @@
 #include "../../Transport/transport.h"
 
 /* Room kept free in the intent queue for release/neutralizing commands so a
- * saturated session can always neutralise drive/fire. */
+ * saturated session can always neutralise drive/fire.  Both peers' server-side
+ * departures need two intents each, so eight covers both with slack (D3-E). */
 #define SERVER_NET_RELEASE_RESERVE	8
+
+/*
+ * D3-E fair bounded admission bounds.  Per connected peer, per simulation
+ * tick:
+ *
+ *   - at most SERVER_NET_PEER_EVENT_QUOTA received transport events are
+ *     serviced (the router's per-peer share of the global budget);
+ *   - at most SERVER_NET_PEER_INTENT_QUOTA non-release engine intents are
+ *     admitted;
+ *   - at most SERVER_NET_PEER_RELEASE_QUOTA release/neutralising engine
+ *     intents are admitted.
+ *
+ * Two peers can therefore occupy at most 2*(56+4) = 120 of the 128-entry
+ * engine queue in one tick, so a flooding peer can never consume the
+ * SERVER_NET_RELEASE_RESERVE head-room and starve the other peer's drive or
+ * fire release (nor either peer's server-side neutralisation).
+ */
+#define SERVER_NET_PEER_INTENT_QUOTA	56
+#define SERVER_NET_PEER_RELEASE_QUOTA	4
+#define SERVER_NET_PEER_EVENT_QUOTA	32
+
+/* Nonblocking transport work admitted per simulation tick (mirrors the frozen
+ * XTK_MAX_SERVICE_WORK_PER_TICK budget in Protocol/limits.h). */
+#define SERVER_NET_SERVICE_BUDGET	64
+
+/* Bounded admission-session table (the rotating peer-first cursor wraps here). */
+#define SERVER_NET_MAX_SESSIONS		8
 
 typedef struct ServerNetSession ServerNetSession;
 
@@ -56,7 +84,10 @@ typedef struct {
 	unsigned long cmds_range;
 	unsigned long cmds_unauthorized;
 	unsigned long cmds_saturated;
+	unsigned long cmds_bad_channel;
 	unsigned long intents_pushed;
+	unsigned long quota_rejects;
+	unsigned long events_skipped;
 	unsigned long heartbeats;
 	unsigned long acks_sent;
 	unsigned long applied_marks;
@@ -115,12 +146,43 @@ int server_net_admit_message(ServerNetSession *s, const XtkMessage *msg,
 			     int assign_tick);
 
 /*
+ * Channel-checked admission (P3.6).  `channel` is the actual transport channel
+ * the datagram arrived on (transport_receive's out_channel); the message is
+ * rejected without engine effect when it does not match the channel its type
+ * requires (INPUT_BATCH -> XTK_CH_INPUT, RELIABLE_CMD -> XTK_CH_CONTROL).
+ * Every other validation (peer/session binding, epoch, dedup, finite/range,
+ * expiry, ownership generation, queue quota/reserve) still precedes the
+ * intent.  Returns the number of commands accepted.
+ */
+int server_net_admit_message_on(ServerNetSession *s, const XtkMessage *msg,
+				uint8_t channel, int assign_tick);
+
+/*
  * Admit a raw command array (the message payload) at the next unconsumed tick.
  * `reliable` is 1 for a channel-0 RELIABLE_CMD and 0 for a channel-2 batch;
  * deduplication is shared, so the channel does not affect at-most-once apply.
  */
 int server_net_admit_commands(ServerNetSession *s, const XtkCommand *cmds,
 			      int count, int reliable, int assign_tick);
+
+/*
+ * Begin the admission pass for `assign_tick`: advance the rotating peer-first
+ * cursor and reset every session's per-tick quota counters exactly once when
+ * the tick changes.  Safe to call repeatedly; admit paths also call it
+ * implicitly so a direct-call fixture stays deterministic.
+ */
+void server_net_begin_tick(int assign_tick);
+
+/* The current rotating peer-first cursor (0 .. SERVER_NET_MAX_SESSIONS-1). */
+int server_net_rotation(void);
+
+/*
+ * Per-peer transport-event allowance for the current tick.  Returns 1 (and
+ * consumes one unit) while the session is within SERVER_NET_PEER_EVENT_QUOTA,
+ * else 0.  The router uses this to bound one flooding peer's share of the
+ * global service budget without starving the other.
+ */
+int server_net_session_allow_event(ServerNetSession *s);
 
 /*
  * Bounded pre-step admission point: service each session's transport within a
