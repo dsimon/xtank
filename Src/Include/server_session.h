@@ -110,6 +110,19 @@ ServerSession *server_session_accept(TransportPeer *peer);
 void server_session_destroy(ServerSession *s);
 
 /*
+ * P3.7 departure path.  Every departure reason (QUIT, transport disconnect,
+ * valid-input timeout, output/queue saturation) funnels here at a tick
+ * boundary.  While a match is Running this executes the reviewed P3.2
+ * server-only removal contract for the departing combatant: cancel that
+ * peer's pending/held input, remove its tank without kill/score/death/RNG or
+ * explosion credit, unbind its controller, and retain its storage until the
+ * normal reset.  Admin authority transfers to a remaining human.  When no
+ * admitted human remains the world is cleaned and the server returns to the
+ * listening lobby (D3-D: no forfeit winner, no mid-match bot).  Idempotent.
+ */
+void server_session_depart(ServerSession *s, uint16_t reason);
+
+/*
  * Reject an inbound peer without creating a session: send REJECT with
  * `error_code`/`text` on channel 0 and disconnect it.  Used for an extra peer.
  */
