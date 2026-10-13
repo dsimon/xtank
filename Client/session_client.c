@@ -1,11 +1,18 @@
 /*
- * Client/session_client.c -- client-side network session (P2.14).
+ * Client/session_client.c -- client-side network session (P2.14; P3.10).
  *
  * See Client/session_client.h.  Pure C: no SDL, no X11, no engine.  The pinned
  * ENet transport (Transport/) is the only I/O; this unit never blocks, never
  * allocates per message and never simulates gameplay.
  *
- * Authority: docs/PHASE2-PLAN.md P2.14; docs/PROTOCOL-v1.md sections 3-9.
+ * P3.10 authority rules (docs/PHASE3-DECISIONS.md D3-B/D3-E):
+ *   - the WELCOME role is observer/player only and NEVER grants administrator;
+ *   - administrator is the server-authored LOBBY_STATE.admin_index applied to
+ *     this client's self_index;
+ *   - a datagram from a foreign peer, the wrong channel, a foreign session id
+ *     or a stale epoch is discarded before any state change.
+ *
+ * Authority: docs/PHASE3-PLAN.md P3.10; docs/PROTOCOL-v1.1.md sections 3-9.
  */
 
 #include "session_client.h"
@@ -21,6 +28,8 @@
 
 #define XTK_CLIENT_BUILD      0x0001u
 
+#define XTK_SC_INDEX_NONE     0xFFu
+
 struct XtkSessionClient {
 	Transport *t;
 	TransportPeer *peer;
@@ -33,8 +42,22 @@ struct XtkSessionClient {
 
 	char name[XTK_MAX_NAME_BYTES + 1];
 
+	/* Server-authored lobby/session status (LOBBY_STATE). */
+	uint8_t  self_index;
+	uint8_t  admin_index;
+	uint8_t  human_capacity;
+	uint8_t  drone_count;
+	uint8_t  wire_state;
+	uint16_t maze_id;
+	uint16_t vehicle_id;
+	uint32_t config_revision;
+	int      have_lobby_state;
+	int      roster_count;
+	XtkRosterEntry roster[XTK_LOBBY_ROSTER_MAX];
+
 	uint32_t ctrl_seq;
 	uint32_t input_seq;
+	uint32_t ping_seq;
 
 	uint32_t client_nonce;
 
@@ -55,6 +78,34 @@ static void set_error(XtkSessionClient *c, uint16_t code, const char *text)
 		c->error_text[XTK_MAX_ERROR_TEXT_BYTES] = '\0';
 	} else {
 		c->error_text[0] = '\0';
+	}
+}
+
+static void clear_session_state(XtkSessionClient *c)
+{
+	c->session_id = 0;
+	c->epoch = 0;
+	c->is_admin = 0;
+	c->self_index = XTK_SC_INDEX_NONE;
+	c->admin_index = XTK_SC_INDEX_NONE;
+	c->human_capacity = 0;
+	c->drone_count = 0;
+	c->wire_state = (uint8_t)XTK_SESSION_LOBBY;
+	c->maze_id = 0;
+	c->vehicle_id = 0;
+	c->config_revision = 0;
+	c->have_lobby_state = 0;
+	c->roster_count = 0;
+	memset(c->roster, 0, sizeof(c->roster));
+	c->last_error = XTK_ERR_NONE;
+	c->error_text[0] = '\0';
+	c->deadline_set = 0;
+}
+
+static void note_epoch(XtkSessionClient *c, uint32_t e)
+{
+	if (e > c->epoch) {
+		c->epoch = e;
 	}
 }
 
@@ -87,12 +138,17 @@ XtkSessionClient *session_client_create(void)
 	if (c == NULL) {
 		return NULL;
 	}
-	c->t = transport_create(0, 1);
+	/*
+	 * A client transport holds a spare peer slot so an in-process rejoin can
+	 * open its new connection while a just-released one drains.
+	 */
+	c->t = transport_create(0, 2);
 	if (c->t == NULL) {
 		free(c);
 		return NULL;
 	}
 	c->state = XTK_SC_DISCONNECTED;
+	clear_session_state(c);
 	c->client_nonce = 0x58544B31u;
 	c->client_nonce ^= (uint32_t)(uintptr_t)c;
 	return c;
@@ -108,6 +164,14 @@ int session_client_connect(XtkSessionClient *c, const char *host, uint16_t port,
 		strncpy(c->name, name, XTK_MAX_NAME_BYTES);
 		c->name[XTK_MAX_NAME_BYTES] = '\0';
 	}
+	/* Rejoin in-process: drop any prior peer and forget prior session state. */
+	if (c->peer != NULL && c->t != NULL) {
+		transport_disconnect(c->t, c->peer);
+		c->peer = NULL;
+	}
+	clear_session_state(c);
+	c->ctrl_seq = 0;
+	c->input_seq = 0;
 	c->peer = transport_connect(c->t, host, port);
 	if (c->peer == NULL) {
 		c->state = XTK_SC_FAILED;
@@ -115,7 +179,6 @@ int session_client_connect(XtkSessionClient *c, const char *host, uint16_t port,
 		return -1;
 	}
 	c->state = XTK_SC_CONNECTING;
-	c->deadline_set = 0;
 	return 0;
 }
 
@@ -132,6 +195,21 @@ void session_client_destroy(XtkSessionClient *c)
 		transport_destroy(c->t);
 	}
 	free(c);
+}
+
+void session_client_reconnect(XtkSessionClient *c)
+{
+	if (c == NULL) {
+		return;
+	}
+	if (c->peer != NULL && c->t != NULL) {
+		transport_disconnect(c->t, c->peer);
+		c->peer = NULL;
+	}
+	clear_session_state(c);
+	c->state = XTK_SC_DISCONNECTED;
+	c->ctrl_seq = 0;
+	c->input_seq = 0;
 }
 
 static void send_hello(XtkSessionClient *c)
@@ -159,39 +237,118 @@ static void send_hello(XtkSessionClient *c)
 	(void)sc_send(c, &m, XTK_CH_CONTROL);
 }
 
-/* ---- inbound state update -------------------------------------------- */
+/* ---- inbound validation and state update ----------------------------- */
 
-static void update_state(XtkSessionClient *c, const XtkMessage *m)
+static int ingest_lobby_state(XtkSessionClient *c, const XtkLobbyStatus *ls)
 {
-	switch (m->env.message_type) {
-	case XTK_MSG_WELCOME:
+	int i, n = ls->human_count;
+
+	if (n < 0) {
+		n = 0;
+	}
+	if (n > (int)XTK_LOBBY_ROSTER_MAX) {
+		n = (int)XTK_LOBBY_ROSTER_MAX;
+	}
+	c->have_lobby_state = 1;
+	c->config_revision = ls->config_revision;
+	c->wire_state = ls->session_state;
+	c->drone_count = ls->drone_count;
+	c->maze_id = ls->maze_id;
+	c->vehicle_id = ls->vehicle_id;
+	c->self_index = ls->self_index;
+	c->admin_index = ls->admin_index;
+	/* Authoritative authority: only the server-authored admin index grants it. */
+	c->is_admin = (ls->admin_index != XTK_SC_INDEX_NONE &&
+		       ls->admin_index == ls->self_index) ? 1 : 0;
+	c->roster_count = n;
+	for (i = 0; i < n; i++) {
+		c->roster[i] = ls->entry[i];
+	}
+
+	switch (ls->session_state) {
+	case XTK_SESSION_RUNNING:
+		c->state = XTK_SC_RUNNING;
+		break;
+	case XTK_SESSION_RESULTS:
+		c->state = XTK_SC_RESULTS;
+		break;
+	case XTK_SESSION_LOBBY:
+	default:
 		c->state = XTK_SC_LOBBY;
-		c->session_id = m->env.session_id;
-		c->is_admin = (m->body.welcome.role == 1) ? 1 : 0;
+		break;
+	}
+	return 1;
+}
+
+int session_client_ingest(XtkSessionClient *c, int peer_ok, uint8_t channel,
+			  const XtkMessage *msg)
+{
+	if (c == NULL || msg == NULL) {
+		return 0;
+	}
+	/* A datagram from a foreign peer can never touch this session. */
+	if (!peer_ok) {
+		return 0;
+	}
+	/* The transport channel must match the message class (P3.6 boundary). */
+	if (channel != msg->env.channel ||
+	    channel != xtk_next_channel(msg->env.message_type)) {
+		return 0;
+	}
+	/*
+	 * A foreign session id is ignored once this client has been welcomed.  A
+	 * pre-admission REJECT/PROTOCOL_ERROR carries session id 0 and is still
+	 * allowed so the actionable error reaches the UI.
+	 */
+	if (c->session_id != 0 && msg->env.session_id != 0 &&
+	    msg->env.session_id != c->session_id) {
+		return 0;
+	}
+	/*
+	 * Stale epoch: a live-epoch message from an epoch older than the highest
+	 * one this client has seen cannot regress it (e.g. a late RESULTS after a
+	 * new START).  START/EPOCH_BEGIN carry the new epoch and are handled below.
+	 */
+	if (msg->env.message_type != XTK_MSG_START &&
+	    msg->env.message_type != XTK_MSG_EPOCH_BEGIN &&
+	    c->epoch != 0 && msg->env.epoch != 0 && msg->env.epoch < c->epoch) {
+		return 0;
+	}
+
+	switch (msg->env.message_type) {
+	case XTK_MSG_WELCOME:
+		c->session_id = msg->env.session_id;
+		c->human_capacity = msg->body.welcome.human_capacity;
+		/* Never derive administrator from the WELCOME player role. */
+		c->is_admin = 0;
+		c->admin_index = XTK_SC_INDEX_NONE;
+		c->self_index = XTK_SC_INDEX_NONE;
+		c->state = XTK_SC_LOBBY;
 		break;
 	case XTK_MSG_CONTENT_CATALOG:
-		/* Presentation stores the catalog; session only notes arrival. */
 		break;
+	case XTK_MSG_LOBBY_STATE:
+		return ingest_lobby_state(c, &msg->body.lobby_state);
 	case XTK_MSG_START:
+		note_epoch(c, msg->env.epoch);
 		c->state = XTK_SC_RUNNING;
-		c->epoch = m->env.epoch;
 		break;
 	case XTK_MSG_EPOCH_BEGIN:
+		note_epoch(c, msg->body.epoch_begin.epoch);
 		c->state = XTK_SC_RUNNING;
-		c->epoch = m->body.epoch_begin.epoch;
 		break;
 	case XTK_MSG_RESULTS:
 		c->state = XTK_SC_RESULTS;
 		break;
 	case XTK_MSG_REJECT:
 		c->state = XTK_SC_FAILED;
-		c->last_error = m->body.reject.error_code;
-		strncpy(c->error_text, m->body.reject.text,
+		c->last_error = msg->body.reject.error_code;
+		strncpy(c->error_text, msg->body.reject.text,
 			XTK_MAX_ERROR_TEXT_BYTES);
 		c->error_text[XTK_MAX_ERROR_TEXT_BYTES] = '\0';
 		break;
 	case XTK_MSG_PROTOCOL_ERROR:
-		c->last_error = m->body.protocol_error.error_code;
+		c->last_error = msg->body.protocol_error.error_code;
 		break;
 	case XTK_MSG_QUIT:
 		c->state = XTK_SC_DISCONNECTED;
@@ -199,6 +356,7 @@ static void update_state(XtkSessionClient *c, const XtkMessage *m)
 	default:
 		break;
 	}
+	return 1;
 }
 
 /* ---- pump ------------------------------------------------------------ */
@@ -258,9 +416,10 @@ int session_client_pump(XtkSessionClient *c, uint64_t now_ns,
 		if (xtk_decode(buf, len, &msg) != XTK_ERR_NONE) {
 			continue;
 		}
-		update_state(c, &msg);
-		if (fn != NULL) {
-			(void)fn(user, &msg);
+		if (session_client_ingest(c, rp == c->peer, ch, &msg)) {
+			if (fn != NULL) {
+				(void)fn(user, &msg);
+			}
 		}
 	}
 
@@ -285,8 +444,21 @@ static int send_simple(XtkSessionClient *c, uint8_t type)
 	return sc_send(c, &m, XTK_CH_CONTROL);
 }
 
+int session_client_send_ping(XtkSessionClient *c)
+{
+	XtkMessage m;
+
+	if (c == NULL) {
+		return -1;
+	}
+	memset(&m, 0, sizeof(m));
+	m.env.message_type = XTK_MSG_PING;
+	m.body.ping.nonce = ++c->ping_seq;
+	return sc_send(c, &m, XTK_CH_CONTROL);
+}
+
 int session_client_send_config(XtkSessionClient *c, uint16_t maze,
-			       uint16_t vehicle)
+			       uint16_t vehicle, uint8_t drone_count)
 {
 	XtkMessage m;
 
@@ -297,12 +469,36 @@ int session_client_send_config(XtkSessionClient *c, uint16_t maze,
 	m.env.message_type = XTK_MSG_CONFIG_SELECT;
 	m.body.config_select.maze_id = maze;
 	m.body.config_select.vehicle_id = vehicle;
+	m.body.config_select.drone_count = drone_count;
 	return sc_send(c, &m, XTK_CH_CONTROL);
 }
 
-int session_client_send_ready(XtkSessionClient *c)
+int session_client_send_ready(XtkSessionClient *c, int ready)
 {
-	return send_simple(c, XTK_MSG_READY);
+	XtkMessage m;
+
+	if (c == NULL) {
+		return -1;
+	}
+	memset(&m, 0, sizeof(m));
+	m.env.message_type = XTK_MSG_READY;
+	m.body.ready.ready = ready ? 1 : 0;
+	/* D3-B: readiness is always expressed against the current revision. */
+	m.body.ready.config_revision = c->config_revision;
+	return sc_send(c, &m, XTK_CH_CONTROL);
+}
+
+int session_client_send_start(XtkSessionClient *c)
+{
+	XtkMessage m;
+
+	if (c == NULL) {
+		return -1;
+	}
+	memset(&m, 0, sizeof(m));
+	m.env.message_type = XTK_MSG_START_REQUEST;
+	m.body.start_request.expected_config_revision = c->config_revision;
+	return sc_send(c, &m, XTK_CH_CONTROL);
 }
 
 int session_client_send_reset(XtkSessionClient *c)
@@ -373,4 +569,72 @@ uint16_t session_client_last_error(const XtkSessionClient *c)
 const char *session_client_error_text(const XtkSessionClient *c)
 {
 	return (c != NULL) ? c->error_text : "";
+}
+
+void session_client_clear_error(XtkSessionClient *c)
+{
+	if (c != NULL) {
+		c->last_error = XTK_ERR_NONE;
+		c->error_text[0] = '\0';
+	}
+}
+
+uint8_t session_client_self_index(const XtkSessionClient *c)
+{
+	return (c != NULL) ? c->self_index : XTK_SC_INDEX_NONE;
+}
+
+uint8_t session_client_admin_index(const XtkSessionClient *c)
+{
+	return (c != NULL) ? c->admin_index : XTK_SC_INDEX_NONE;
+}
+
+uint8_t session_client_human_capacity(const XtkSessionClient *c)
+{
+	return (c != NULL) ? c->human_capacity : 0;
+}
+
+uint8_t session_client_drone_count(const XtkSessionClient *c)
+{
+	return (c != NULL) ? c->drone_count : 0;
+}
+
+uint8_t session_client_wire_state(const XtkSessionClient *c)
+{
+	return (c != NULL) ? c->wire_state : (uint8_t)XTK_SESSION_LOBBY;
+}
+
+uint16_t session_client_maze_id(const XtkSessionClient *c)
+{
+	return (c != NULL) ? c->maze_id : 0;
+}
+
+uint16_t session_client_vehicle_id(const XtkSessionClient *c)
+{
+	return (c != NULL) ? c->vehicle_id : 0;
+}
+
+uint32_t session_client_config_revision(const XtkSessionClient *c)
+{
+	return (c != NULL) ? c->config_revision : 0;
+}
+
+int session_client_have_lobby_state(const XtkSessionClient *c)
+{
+	return (c != NULL) ? c->have_lobby_state : 0;
+}
+
+int session_client_roster_count(const XtkSessionClient *c)
+{
+	return (c != NULL) ? c->roster_count : 0;
+}
+
+int session_client_roster(const XtkSessionClient *c, int index,
+			  XtkRosterEntry *out)
+{
+	if (c == NULL || out == NULL || index < 0 || index >= c->roster_count) {
+		return -1;
+	}
+	*out = c->roster[index];
+	return 0;
 }
