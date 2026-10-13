@@ -372,6 +372,10 @@ direct_lobby(ServerSession *s)
 
 	memset(&m, 0, sizeof(m));
 	m.env.message_type = XTK_MSG_READY;
+	/* D3-B revision rule: readiness is expressed against the accepted
+	 * config revision. */
+	m.body.ready.ready = 1;
+	m.body.ready.config_revision = server_session_config_revision(s);
 	(void) server_session_message(s, &m, 1000);
 }
 
@@ -565,8 +569,17 @@ run_network(const char *dump_path, const char *snap_path)
 	check("network: client admin", session_client_is_admin(sc) == 1);
 
 	(void) session_client_send_config(sc, XTK_CONTENT_ID_ARENA,
-					  XTK_CONTENT_ID_VANGUARD);
-	(void) session_client_send_ready(sc);
+					  XTK_CONTENT_ID_VANGUARD, 0);
+	/* Wait for the server's CONFIG_STATUS before expressing readiness
+	 * against the resulting revision (P3.10 revision rule). */
+	for (i = 0; i < 4000 && session_client_config_revision(sc) == 0; i++) {
+		(void) server_session_service(1000);
+		(void) session_client_pump(sc, ns, net_callback, &ctx);
+		ns += 66666667ULL;
+	}
+	check("network: config revision known",
+	      session_client_config_revision(sc) != 0);
+	(void) session_client_send_ready(sc, 1);
 	for (i = 0; i < 4000 && !(s != NULL && server_session_state(s) ==
 				  SERVER_SESSION_RUNNING); i++) {
 		(void) server_session_service(1000);
