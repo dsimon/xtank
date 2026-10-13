@@ -17,8 +17,6 @@
 #include "intent.h"
 #include "server_net.h"
 
-#define SERVER_NET_MAX_SESSIONS		8
-
 /* Ack log ring: one entry per emitted acknowledgment. */
 #define SERVER_NET_ACK_LOG		XTK_CMD_DEDUP_WINDOW
 
@@ -70,12 +68,24 @@ struct ServerNetSession {
 		int assigned_tick;
 	} inflight[SERVER_NET_INFLIGHT];
 	int inflight_count;
+
+	/* D3-E fair per-peer per-tick admission counters.  They are reset when
+	 * the tick changes (server_net_begin_tick/note_tick). */
+	int quota_tick;
+	int quota_intents;		/* non-release engine intents admitted */
+	int quota_releases;		/* release/neutralising intents admitted */
+	int quota_events;		/* transport events admitted */
 };
 
 static ServerNetSession sessions[SERVER_NET_MAX_SESSIONS];
 static int nsessions;
 static Transport *net_transport;
 static ServerNetStats stats;
+
+/* Rotating peer-first admission cursor and the tick the per-peer quotas
+ * belong to. */
+static int net_tick = 0;
+static int net_rotate = 0;
 
 static uint8_t rxbuf[TRANSPORT_MAX_PACKET];
 static XtkMessage rxmsg;
@@ -94,6 +104,54 @@ void
 server_net_set_transport(Transport *t)
 {
 	net_transport = t;
+}
+
+/*
+ * Advance the rotating peer-first cursor and reset every session's per-tick
+ * quota counters exactly once when the simulation tick changes.  A direct-call
+ * fixture that never calls server_net_begin_tick() still gets a deterministic
+ * reset because every admit/allow path notes the tick here.
+ */
+static void
+note_tick(int assign_tick)
+{
+	int i;
+
+	if (assign_tick == net_tick)
+		return;
+	net_tick = assign_tick;
+	net_rotate = (net_rotate + 1) % SERVER_NET_MAX_SESSIONS;
+	for (i = 0; i < SERVER_NET_MAX_SESSIONS; i++) {
+		sessions[i].quota_tick = assign_tick;
+		sessions[i].quota_intents = 0;
+		sessions[i].quota_releases = 0;
+		sessions[i].quota_events = 0;
+	}
+}
+
+void
+server_net_begin_tick(int assign_tick)
+{
+	note_tick(assign_tick);
+}
+
+int
+server_net_rotation(void)
+{
+	return net_rotate;
+}
+
+int
+server_net_session_allow_event(ServerNetSession *s)
+{
+	if (s == (ServerNetSession *) NULL || !s->used)
+		return 0;
+	if (s->quota_events >= SERVER_NET_PEER_EVENT_QUOTA) {
+		stats.events_skipped++;
+		return 0;
+	}
+	s->quota_events++;
+	return 1;
 }
 
 int
@@ -226,6 +284,10 @@ server_net_session_begin_epoch(ServerNetSession *s, uint32_t epoch,
 	s->last_packet_seq = 0;
 	s->inflight_count = 0;
 	s->outack_count = 0;
+	s->quota_tick = net_tick;
+	s->quota_intents = 0;
+	s->quota_releases = 0;
+	s->quota_events = 0;
 }
 
 uint32_t
@@ -457,7 +519,8 @@ reject(ServerNetSession *s, const XtkCommand *c, int tick, uint16_t reason)
 	  case XTK_ERR_STALE_EPOCH:	stats.cmds_stale_epoch++; break;
 	  case XTK_ERR_STALE_SEQUENCE:	stats.cmds_stale_epoch++; break;
 	  case XTK_ERR_FOREIGN_OWNER:	stats.cmds_foreign++; break;
-	  case XTK_ERR_QUEUE_SATURATED:	stats.cmds_saturated++; break;
+	  case XTK_ERR_QUEUE_SATURATED:	stats.cmds_saturated++; stats.quota_rejects++; break;
+	  case XTK_ERR_BAD_CHANNEL:	stats.cmds_bad_channel++; break;
 	  default:			break;
 	}
 }
@@ -471,6 +534,9 @@ admit_one(ServerNetSession *s, const XtkCommand *c, int assign_tick,
 	int rc;
 
 	(void) reliable;	/* dedup is shared across channels */
+
+	/* Reset the per-peer per-tick quotas when the tick changes. */
+	note_tick(assign_tick);
 
 	/* Ownership: the session's binding, never a peer-supplied player. */
 	if (!s->bound ||
@@ -511,10 +577,25 @@ admit_one(ServerNetSession *s, const XtkCommand *c, int assign_tick,
 		return 1;
 	}
 
-	/* Reserve room for release/neutralisation under saturation. */
-	if (intent_queued() >= INTENT_QUEUE_MAX - SERVER_NET_RELEASE_RESERVE &&
-	    !command_is_release(c)) {
-		/* Transient: do not remember it, so a later batch may retry. */
+	/* D3-E per-peer per-tick fairness quota.  A flooding peer never gets
+	 * more than its own share of this tick, so the healthy peer's
+	 * next-tick admission and either peer's drive/fire release stay
+	 * available.  Release commands have their own small quota so a peer
+	 * can always neutralise. */
+	if (command_is_release(c)) {
+		if (s->quota_releases >= SERVER_NET_PEER_RELEASE_QUOTA) {
+			reject(s, c, assign_tick, XTK_ERR_QUEUE_SATURATED);
+			return 0;
+		}
+	} else if (s->quota_intents >= SERVER_NET_PEER_INTENT_QUOTA) {
+		reject(s, c, assign_tick, XTK_ERR_QUEUE_SATURATED);
+		return 0;
+	}
+
+	/* Keep SERVER_NET_RELEASE_RESERVE engine slots free for the two
+	 * server-side neutralisations.  Transient: do not remember it, so a
+	 * later batch may retry. */
+	if (intent_queued() >= INTENT_QUEUE_MAX - SERVER_NET_RELEASE_RESERVE) {
 		reject(s, c, assign_tick, XTK_ERR_QUEUE_SATURATED);
 		return 0;
 	}
@@ -530,6 +611,10 @@ admit_one(ServerNetSession *s, const XtkCommand *c, int assign_tick,
 
 	rc = intent_push(&in);
 	if (rc == INTENT_OK) {
+		if (command_is_release(c))
+			s->quota_releases++;
+		else
+			s->quota_intents++;
 		dedup_insert(s, c->command_id);
 		record_ack(s, c->command_id, assign_tick, XTK_ACK_ACCEPTED,
 			   XTK_ERR_NONE);
@@ -595,15 +680,11 @@ stale_batch(ServerNetSession *s, const XtkCommand *cmds, int count,
 	return 0;			/* nothing accepted */
 }
 
-int
-server_net_admit_message(ServerNetSession *s, const XtkMessage *msg,
-			 int assign_tick)
+static int
+admit_message_internal(ServerNetSession *s, const XtkMessage *msg,
+		       int assign_tick)
 {
 	int count;
-
-	if (s == (ServerNetSession *) NULL || !s->used ||
-	    msg == (const XtkMessage *) NULL)
-		return 0;
 
 	switch (msg->env.message_type) {
 	  case XTK_MSG_INPUT_BATCH:
@@ -632,6 +713,53 @@ server_net_admit_message(ServerNetSession *s, const XtkMessage *msg,
 	  default:
 		return 0;
 	}
+}
+
+int
+server_net_admit_message(ServerNetSession *s, const XtkMessage *msg,
+			 int assign_tick)
+{
+	if (s == (ServerNetSession *) NULL || !s->used ||
+	    msg == (const XtkMessage *) NULL)
+		return 0;
+	note_tick(assign_tick);
+	return admit_message_internal(s, msg, assign_tick);
+}
+
+int
+server_net_admit_message_on(ServerNetSession *s, const XtkMessage *msg,
+			    uint8_t channel, int assign_tick)
+{
+	const XtkCommand *cmds = (const XtkCommand *) NULL;
+	int count = 0;
+	uint8_t want;
+
+	if (s == (ServerNetSession *) NULL || !s->used ||
+	    msg == (const XtkMessage *) NULL)
+		return 0;
+
+	note_tick(assign_tick);
+
+	/* The actual transport channel must match the message's class before
+	 * any command is considered (wire.h XTK_CH_*). */
+	want = xtk_next_channel(msg->env.message_type);
+	if (want == 0xFFu || channel != want) {
+		if (msg->env.message_type == XTK_MSG_INPUT_BATCH) {
+			cmds = msg->body.input_batch.command;
+			count = (int) msg->body.input_batch.command_count;
+		} else if (msg->env.message_type == XTK_MSG_RELIABLE_CMD) {
+			cmds = msg->body.reliable_cmd.command;
+			count = (int) msg->body.reliable_cmd.command_count;
+		}
+		for (; count > 0; count--, cmds++) {
+			record_ack(s, cmds->command_id, assign_tick,
+				   XTK_ACK_REJECTED, XTK_ERR_BAD_CHANNEL);
+			stats.cmds_rejected++;
+			stats.cmds_bad_channel++;
+		}
+		return 0;
+	}
+	return admit_message_internal(s, msg, assign_tick);
 }
 
 /* ------------------------------------------------------------------ */
@@ -707,6 +835,8 @@ server_net_pre_step(int assign_tick)
 	if (net_transport == (Transport *) NULL)
 		return 0;
 
+	note_tick(assign_tick);
+
 	events = transport_service(net_transport,
 				   (int) XTK_MAX_SERVICE_WORK_PER_TICK);
 	if (events < 0)
@@ -723,22 +853,33 @@ server_net_pre_step(int assign_tick)
 			server_net_session_destroy(s);
 	}
 
-	for (;;) {
-		size_t len;
-		uint8_t ch;
-		ServerNetSession *s;
-		int r = transport_receive(net_transport, &p, rxbuf, sizeof(rxbuf),
-					  &len, &ch);
+	{
+		int served = 0;
 
-		if (r <= 0)
-			break;
-		s = session_for_peer(p);
-		if (s == (ServerNetSession *) NULL)
-			continue;
-		stats.packets_rx++;
-		if (xtk_decode(rxbuf, len, &rxmsg) != XTK_ERR_NONE)
-			continue;
-		(void) server_net_admit_message(s, &rxmsg, assign_tick);
+		while (served < (int) SERVER_NET_SERVICE_BUDGET) {
+			size_t len;
+			uint8_t ch;
+			ServerNetSession *s;
+			int r = transport_receive(net_transport, &p, rxbuf,
+						  sizeof(rxbuf), &len, &ch);
+
+			if (r <= 0)
+				break;
+			served++;
+			s = session_for_peer(p);
+			if (s == (ServerNetSession *) NULL)
+				continue;
+			/* Fair per-peer event budget: a flooding peer cannot
+			 * consume the whole tick, so the healthy peer is still
+			 * serviced. */
+			if (!server_net_session_allow_event(s))
+				continue;
+			stats.packets_rx++;
+			if (xtk_decode(rxbuf, len, &rxmsg) != XTK_ERR_NONE)
+				continue;
+			(void) server_net_admit_message_on(s, &rxmsg, ch,
+							   assign_tick);
+		}
 	}
 
 	for (i = 0; i < SERVER_NET_MAX_SESSIONS; i++)
