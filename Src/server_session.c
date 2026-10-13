@@ -80,6 +80,7 @@ struct ServerSession {
 	int index;
 	int in_handshake;	/* 1 until a valid HELLO is accepted */
 	int disconnected;	/* QUIT or fatal peer error; service reclaims */
+	uint16_t departure_reason;	/* XTK_ERR_*; 0 = voluntary quit/none */
 
 	uint32_t session_id;		/* stable connection identity */
 	uint32_t controller_id;		/* stable controller identity */
@@ -871,6 +872,7 @@ server_session_message_ch(ServerSession *s, const XtkMessage *msg,
 		return XTK_ERR_NONE;
 	  }
 	  case XTK_MSG_QUIT:
+		s->departure_reason = XTK_ERR_NONE;	/* voluntary */
 		s->disconnected = 1;
 		return XTK_ERR_NONE;
 	  case XTK_MSG_HELLO:
@@ -972,6 +974,77 @@ server_session_accept(TransportPeer *peer)
 	/* Administrator is assigned on successful HELLO (handle_hello), so a
 	 * half-open connection cannot hold the shared administrator role. */
 	return s;
+}
+
+/* Admitted humans still present, ignoring `skip` (the departing peer). */
+static int
+session_remaining_peers(const ServerSession *skip)
+{
+	int i, n = 0;
+
+	for (i = 0; i < SERVER_SESSION_MAX_PEERS; i++) {
+		if (&peers[i] == skip)
+			continue;
+		if (peer_active(&peers[i]))
+			n++;
+	}
+	return n;
+}
+
+void
+server_session_depart(ServerSession *s, uint16_t reason)
+{
+	int slot, remaining;
+
+	if (s == (ServerSession *) NULL || !s->used)
+		return;
+
+	/* Mark the peer inactive immediately so it is excluded from rosters,
+	 * results delivery and the remaining-human count. */
+	s->departure_reason = reason;
+	s->disconnected = 1;
+
+	slot = s->bound_slot;
+
+	/*
+	 * The reviewed P3.2 removal contract, applied once at this tick
+	 * boundary while the match is live and this peer owns a combatant.
+	 */
+	if (lobby.state == SERVER_SESSION_RUNNING && slot >= 0) {
+		/*
+		 * 1. Cancel this controller's queued and held input.  This is
+		 *    player-scoped, so the survivor's input is untouched (the
+		 *    departed storage is still alive here and would otherwise
+		 *    fire a ghost projectile).
+		 */
+		intent_cancel_player(slot);
+
+		/*
+		 * 2. Remove the tank with no kill/score/death/RNG/explosion
+		 *    side effect.  Storage is retained so outstanding projectile
+		 *    owner references stay valid until the normal reset.
+		 */
+		server_depart_vehicle(slot);
+
+		/* 3. Unbind the controller (bumps the binding generation). */
+		server_players_unbind_slot(slot);
+		s->bound_slot = -1;
+	}
+
+	/*
+	 * No admitted human left: clean the world and return to the listening
+	 * lobby.  The retained score/name still reach the (empty) result set
+	 * through the shared results path, which reports abort/no-winner.
+	 */
+	remaining = session_remaining_peers(s);
+	if (lobby.state == SERVER_SESSION_RUNNING && remaining == 0) {
+		server_session_finish(s, GAME_OVER);
+		server_session_return_to_lobby(s);
+	}
+
+	/* Release the peer record (net session, transport, binding generation
+	 * and administrator transfer all happen here). */
+	server_session_destroy(s);
 }
 
 void
@@ -1320,31 +1393,6 @@ session_deliver(ServerSession *p)
 	}
 }
 
-static void
-session_neutralize(ServerSession *p)
-{
-	Intent in;
-
-	if (p->bound_slot < 0)
-		return;
-	(void) memset(&in, 0, sizeof(in));
-	in.tick = frame + 1;
-	in.player = p->bound_slot;
-	/*
-	 * Neutralisation uses the top of the sequence space so it can never
-	 * collide with a peer's own (low, monotonically increasing) admitted
-	 * sequences, and so it is ordered last within the tick.
-	 */
-	in.sequence = 0xFFFFFFFEu;
-	in.op = INTENT_DRIVE_REL;
-	in.a = 0.0;
-	(void) intent_push(&in);
-	in.sequence = 0xFFFFFFFFu;
-	in.op = INTENT_FIRE_HOLD;
-	in.a = 0.0;
-	(void) intent_push(&in);
-}
-
 int
 server_session_step(ServerSession *s, uint64_t t)
 {
@@ -1354,19 +1402,22 @@ server_session_step(ServerSession *s, uint64_t t)
 	if (lobby.state != SERVER_SESSION_RUNNING)
 		return SERVER_SESSION_ERR_STATE;
 
-	/* D2-F timeout: two seconds without valid traffic from any peer. */
+	/*
+	 * D2-F/D3-E timeout: two seconds without valid input.  Removal happens
+	 * once, at this tick boundary, through the shared departure path; a
+	 * remaining human keeps playing.  Only when no human remains does the
+	 * world end and return to the lobby.
+	 */
 	for (i = 0; i < SERVER_SESSION_MAX_PEERS; i++) {
 		ServerSession *p = &peers[i];
 
 		if (!peer_active(p) || p->last_rx_ms == 0)
 			continue;
-		if (t - p->last_rx_ms > (uint64_t) XTK_NEUTRAL_TIMEOUT_MS) {
-			session_neutralize(p);
-			server_session_finish(s, GAME_OVER);
-			server_session_return_to_lobby(s);
-			return GAME_OVER;
-		}
+		if (t - p->last_rx_ms > (uint64_t) XTK_NEUTRAL_TIMEOUT_MS)
+			server_session_depart(p, XTK_ERR_TIMEOUT);
 	}
+	if (lobby.state != SERVER_SESSION_RUNNING)
+		return GAME_OVER;
 
 	status = server_step();
 	server_events_observe();
@@ -1398,6 +1449,19 @@ server_session_finish(ServerSession *s, int status)
 
 	valid = server_events_results_valid() &&
 		server_events_results(&r) == SERVER_EVENTS_OK;
+
+	/*
+	 * D3-D: a departed combatant keeps its retained score and name in the
+	 * final results, marked departed.  The result entry order matches the
+	 * retained combatant order, so tag by the entry's stable slot.
+	 */
+	if (valid) {
+		for (i = 0; i < r.vehicle_count; i++) {
+			if (server_slot_departed((int) r.entry[i].slot))
+				r.entry[i].flags |= XTK_FLAG_DEPARTED;
+		}
+	}
+
 	for (i = 0; i < SERVER_SESSION_MAX_PEERS; i++) {
 		ServerSession *p = &peers[i];
 
@@ -1433,68 +1497,94 @@ server_session_service(uint64_t t)
 	TransportPeer *p;
 	int events = 0, i;
 
-	if (host == (Transport *) NULL)
-		return 0;
-
-	events = transport_service(host, (int) SERVER_SESSION_STEP_BUDGET);
-	if (events < 0)
-		events = 0;
-
 	/* Fresh per-tick admission quotas and the rotating peer-first cursor. */
 	server_net_begin_tick(frame + 1);
 
-	while (transport_poll_connect(host, &p)) {
-		if (lobby.state != SERVER_SESSION_LOBBY ||
-		    n_sessions >= session_capacity) {
-			server_session_reject_peer(host, p, XTK_ERR_SESSION_FULL,
-						   "session full");
-		} else {
-			(void) server_session_accept(p);
-		}
-	}
-	while (transport_poll_disconnect(host, &p)) {
-		s = session_for_peer(p);
-		if (s != (ServerSession *) NULL)
-			server_session_destroy(s);
-	}
+	/*
+	 * Transport work is skipped when no host is attached; the departure
+	 * reclaim, saturation check and solo auto-start below still run so a
+	 * direct-drive fixture exercises the real service path.
+	 */
+	if (host != (Transport *) NULL) {
+		events = transport_service(host,
+					   (int) SERVER_SESSION_STEP_BUDGET);
+		if (events < 0)
+			events = 0;
 
-	{
-		int served = 0;
-		int budget = (int) SERVER_NET_SERVICE_BUDGET;
-
-		while (served < budget) {
-			uint8_t buf[TRANSPORT_MAX_PACKET];
-			size_t len = 0;
-			uint8_t ch = 0;
-			XtkMessage msg;
-			int r = transport_receive(host, &p, buf, sizeof(buf),
-						  &len, &ch);
-
-			if (r <= 0)
-				break;
-			served++;
-			s = session_for_peer(p);
-			if (s == (ServerSession *) NULL)
-				continue;
-			/* Bound one flooding peer's share of this tick; the
-			 * healthy peer is still serviced below. */
-			if (s->rx_tick != frame + 1) {
-				s->rx_tick = frame + 1;
-				s->rx_events = 0;
+		while (transport_poll_connect(host, &p)) {
+			if (lobby.state != SERVER_SESSION_LOBBY ||
+			    n_sessions >= session_capacity) {
+				server_session_reject_peer(host, p,
+							   XTK_ERR_SESSION_FULL,
+							   "session full");
+			} else {
+				(void) server_session_accept(p);
 			}
-			if (s->rx_events >= SERVER_NET_PEER_EVENT_QUOTA)
-				continue;
-			s->rx_events++;
-			if (xtk_decode(buf, len, &msg) != XTK_ERR_NONE)
-				continue;
-			(void) server_session_message_ch(s, &msg, ch, t);
+		}
+		while (transport_poll_disconnect(host, &p)) {
+			s = session_for_peer(p);
+			if (s != (ServerSession *) NULL)
+				server_session_depart(s, XTK_ERR_TIMEOUT);
+		}
+
+		{
+			int served = 0;
+			int budget = (int) SERVER_NET_SERVICE_BUDGET;
+
+			while (served < budget) {
+				uint8_t buf[TRANSPORT_MAX_PACKET];
+				size_t len = 0;
+				uint8_t ch = 0;
+				XtkMessage msg;
+				int r = transport_receive(host, &p, buf,
+							  sizeof(buf), &len,
+							  &ch);
+
+				if (r <= 0)
+					break;
+				served++;
+				s = session_for_peer(p);
+				if (s == (ServerSession *) NULL)
+					continue;
+				/* Bound one flooding peer's share of this
+				 * tick; the healthy peer is still serviced. */
+				if (s->rx_tick != frame + 1) {
+					s->rx_tick = frame + 1;
+					s->rx_events = 0;
+				}
+				if (s->rx_events >=
+				    SERVER_NET_PEER_EVENT_QUOTA)
+					continue;
+				s->rx_events++;
+				if (xtk_decode(buf, len, &msg) != XTK_ERR_NONE)
+					continue;
+				(void) server_session_message_ch(s, &msg, ch,
+								 t);
+			}
 		}
 	}
 
-	/* Reclaim peers that quit or failed their handshake. */
+	/*
+	 * Output/queue saturation removes the peer through the same departure
+	 * path (P3.7).  Bounded: only when the reliable backlog exceeds the
+	 * approved per-peer bound; a healthy peer is unaffected.
+	 */
+	for (i = 0; i < SERVER_SESSION_MAX_PEERS; i++) {
+		ServerSession *q = &peers[i];
+
+		if (!peer_active(q) || q->t == (Transport *) NULL ||
+		    q->peer == (TransportPeer *) NULL)
+			continue;
+		if (transport_peer_reliable_bytes(q->t, q->peer) >
+		    XTK_MAX_RELIABLE_QUEUE_BYTES)
+			server_session_depart(q, XTK_ERR_QUEUE_SATURATED);
+	}
+
+	/* Reclaim peers that quit, failed their handshake or departed. */
 	for (i = 0; i < SERVER_SESSION_MAX_PEERS; i++) {
 		if (peers[i].used && peers[i].disconnected)
-			server_session_destroy(&peers[i]);
+			server_session_depart(&peers[i],
+					      peers[i].departure_reason);
 	}
 
 	/* Solo auto-start: suppressed as soon as a second human is present. */
