@@ -87,6 +87,17 @@ static ServerNetStats stats;
 static int net_tick = 0;
 static int net_rotate = 0;
 
+/*
+ * P3.9 aggregate transport-work accounting.  server_net_service() is the only
+ * caller of transport_service() and server_net_drain() the only caller of
+ * transport_receive() in the tree, so both the admission-only pre-step and the
+ * session coordinator share one nonblocking owner and one per-tick bound.
+ */
+static int service_used;	/* transport events serviced this tick */
+static int service_tick;	/* the tick service_used belongs to */
+static int drain_used;		/* datagrams decoded this tick */
+static int drain_tick;		/* the tick drain_used belongs to */
+
 static uint8_t rxbuf[TRANSPORT_MAX_PACKET];
 static XtkMessage rxmsg;
 static uint8_t txbuf[1024];
@@ -823,10 +834,103 @@ server_net_session_backpressure(ServerNetSession *s)
 	return 0;
 }
 
+/*
+ * P3.9: the single caller of transport_service().  The remaining per-tick
+ * budget is what is left of XTK_MAX_SERVICE_WORK_PER_TICK after every earlier
+ * service call for the same tick, so the aggregate never exceeds the frozen
+ * bound regardless of how many peers or paths service the host.
+ */
+int
+server_net_service(int assign_tick)
+{
+	int remaining, events;
+
+	if (net_transport == (Transport *) NULL)
+		return 0;
+
+	note_tick(assign_tick);
+	if (assign_tick != service_tick) {
+		service_tick = assign_tick;
+		service_used = 0;
+	}
+	remaining = (int) XTK_MAX_SERVICE_WORK_PER_TICK - service_used;
+	if (remaining <= 0)
+		return 0;
+
+	events = transport_service(net_transport, remaining);
+	if (events < 0)
+		events = 0;
+	service_used += events;
+
+	stats.service_events += (unsigned long) events;
+	if ((unsigned long) events > stats.service_max_events)
+		stats.service_max_events = (unsigned long) events;
+	return events;
+}
+
+/*
+ * P3.9: the single caller of transport_receive().  Each dequeued datagram is
+ * decoded once and routed through `fn` (the session coordinator) or the
+ * internal admission path (the admission-only pre-step).  Returns the number
+ * of datagrams drained; bounded by SERVER_NET_SERVICE_BUDGET.
+ */
+int
+server_net_drain(int assign_tick, ServerNetRxFn fn, void *ctx)
+{
+	int served = 0;
+
+	if (net_transport == (Transport *) NULL)
+		return 0;
+
+	note_tick(assign_tick);
+	if (assign_tick != drain_tick) {
+		drain_tick = assign_tick;
+		drain_used = 0;
+	}
+	while (served < (int) SERVER_NET_SERVICE_BUDGET) {
+		size_t len;
+		uint8_t ch;
+		TransportPeer *p;
+		int r = transport_receive(net_transport, &p, rxbuf,
+					  sizeof(rxbuf), &len, &ch);
+
+		if (r <= 0)
+			break;
+		served++;
+		if (xtk_decode(rxbuf, len, &rxmsg) != XTK_ERR_NONE)
+			continue;
+
+		if (fn != (ServerNetRxFn) NULL) {
+			fn(ctx, p, &rxmsg, ch, assign_tick);
+			continue;
+		}
+
+		/* Default admission-only routing for one connected peer. */
+		{
+			ServerNetSession *s = session_for_peer(p);
+
+			if (s == (ServerNetSession *) NULL)
+				continue;
+			/* Fair per-peer event budget: a flooding peer cannot
+			 * consume the whole tick, so the healthy peer is still
+			 * serviced. */
+			if (!server_net_session_allow_event(s))
+				continue;
+			stats.packets_rx++;
+			(void) server_net_admit_message_on(s, &rxmsg, ch,
+							   assign_tick);
+		}
+	}
+	drain_used += served;
+	if ((unsigned long) drain_used > stats.drain_max_per_tick)
+		stats.drain_max_per_tick = (unsigned long) drain_used;
+	return served;
+}
+
 int
 server_net_pre_step(int assign_tick)
 {
-	int events = 0;
+	int events;
 	int i;
 	TransportPeer *p;
 
@@ -837,10 +941,7 @@ server_net_pre_step(int assign_tick)
 
 	note_tick(assign_tick);
 
-	events = transport_service(net_transport,
-				   (int) XTK_MAX_SERVICE_WORK_PER_TICK);
-	if (events < 0)
-		events = 0;
+	events = server_net_service(assign_tick);
 
 	while (transport_poll_connect(net_transport, &p)) {
 		if (session_for_peer(p) == (ServerNetSession *) NULL)
@@ -853,42 +954,13 @@ server_net_pre_step(int assign_tick)
 			server_net_session_destroy(s);
 	}
 
-	{
-		int served = 0;
-
-		while (served < (int) SERVER_NET_SERVICE_BUDGET) {
-			size_t len;
-			uint8_t ch;
-			ServerNetSession *s;
-			int r = transport_receive(net_transport, &p, rxbuf,
-						  sizeof(rxbuf), &len, &ch);
-
-			if (r <= 0)
-				break;
-			served++;
-			s = session_for_peer(p);
-			if (s == (ServerNetSession *) NULL)
-				continue;
-			/* Fair per-peer event budget: a flooding peer cannot
-			 * consume the whole tick, so the healthy peer is still
-			 * serviced. */
-			if (!server_net_session_allow_event(s))
-				continue;
-			stats.packets_rx++;
-			if (xtk_decode(rxbuf, len, &rxmsg) != XTK_ERR_NONE)
-				continue;
-			(void) server_net_admit_message_on(s, &rxmsg, ch,
-							   assign_tick);
-		}
-	}
+	(void) server_net_drain(assign_tick, (ServerNetRxFn) NULL,
+				(void *) NULL);
 
 	for (i = 0; i < SERVER_NET_MAX_SESSIONS; i++)
 		if (sessions[i].used)
 			(void) server_net_session_backpressure(&sessions[i]);
 
-	stats.service_events += (unsigned long) events;
-	if ((unsigned long) events > stats.service_max_events)
-		stats.service_max_events = (unsigned long) events;
 	return events;
 }
 
