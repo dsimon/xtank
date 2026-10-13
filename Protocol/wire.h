@@ -1,13 +1,19 @@
 /*
- * Protocol/wire.h -- Xtank wire protocol v1 identifiers and enumerations (P2.2).
+ * Protocol/wire.h -- Xtank wire protocol identifiers and enumerations.
  *
  * Frozen schema constants only.  This header includes no engine, SDL or ENet
- * header, copies no native struct and defines no wire I/O: the codec lands in
- * P2.3.  Every value that appears on the wire is fixed-width and is encoded
- * explicitly in network byte order by the codec; the C types here are only
- * convenient labels and are never memcpy'd onto the wire.
+ * header, copies no native struct and defines no wire I/O.  Every value that
+ * appears on the wire is fixed-width and is encoded explicitly in network
+ * byte order by the codec; the C types here are only convenient labels and are
+ * never memcpy'd onto the wire.
  *
- * Authority: docs/PROTOCOL-v1.md; docs/PHASE2-DECISIONS.md D2-C.
+ * Version 1.0 was frozen by P2.2 (D2-C).  Version 1.1 is frozen by P3.3
+ * (docs/PHASE3-DECISIONS.md D3-A..D3-F): exact-version 1.1, no dual stack.
+ * The 1.1 additions are the multiplayer/session/lifetime extensions only;
+ * gameplay ops and VIEW-v1 knowledge rules are unchanged.
+ *
+ * Authority: docs/PROTOCOL-v1.1.md; docs/PHASE3-DECISIONS.md D3-A..D3-F;
+ * docs/PROTOCOL-v1.md (v1.0 base).
  */
 
 #ifndef XTK_PROTOCOL_WIRE_H
@@ -23,15 +29,18 @@
 #define XTK_WIRE_MAGIC        UINT32_C(0x58544B31)
 
 #define XTK_PROTOCOL_MAJOR    1u
-#define XTK_PROTOCOL_MINOR    0u
+#define XTK_PROTOCOL_MINOR    1u
 
 /* Envelope flag bits (envelope byte 7 is the channel; flags are per message
  * and carried in the first payload byte where a message defines them). */
 #define XTK_FLAG_NONE         UINT8_C(0x00)
-#define XTK_FLAG_KEYFRAME     UINT8_C(0x01)   /* VIEW_SNAPSHOT: full barrier */
+#define XTK_FLAG_KEYFRAME     UINT8_C(0x01)   /* VIEW_*: full-view barrier    */
 #define XTK_FLAG_EDGE         UINT8_C(0x01)   /* command: one-shot edge       */
 #define XTK_FLAG_HELD         UINT8_C(0x02)   /* command: held control        */
 #define XTK_FLAG_RELIABLE     UINT8_C(0x04)   /* command: arrived on ch0      */
+
+/* Per-record flag bits (roster/result entries). */
+#define XTK_FLAG_DEPARTED     UINT8_C(0x01)   /* record: peer/departed marker */
 
 /* Transport channels.  A message received on the wrong channel is discarded
  * and reported as PROTOCOL_ERROR/XTK_ERR_BAD_CHANNEL. */
@@ -56,15 +65,26 @@ enum XtkMessageType {
     XTK_MSG_RESULTS        = 0x16,
     XTK_MSG_RESET          = 0x17,
     XTK_MSG_QUIT           = 0x18,
+    XTK_MSG_LOBBY_STATE    = 0x19,   /* v1.1: reliable session/roster status */
+    XTK_MSG_START_REQUEST  = 0x1A,   /* v1.1: reliable admin start request   */
 
     XTK_MSG_EVENT          = 0x20,
     XTK_MSG_CMD_ACK        = 0x21,
     XTK_MSG_PROTOCOL_ERROR = 0x22,
     XTK_MSG_RELIABLE_CMD   = 0x23,
 
+    XTK_MSG_VIEW_KEYFRAME  = 0x30,   /* v1.1: reliable initial-view barrier  */
     XTK_MSG_VIEW_SNAPSHOT  = 0x40,
 
     XTK_MSG_INPUT_BATCH    = 0x60
+};
+
+/* ---- Session states (LOBBY_STATE.session_state) --------------------- */
+
+enum XtkSessionState {
+    XTK_SESSION_LOBBY   = 0x00,
+    XTK_SESSION_RUNNING = 0x01,
+    XTK_SESSION_RESULTS = 0x02
 };
 
 /* ---- Commands (player input) ---------------------------------------- */
@@ -158,17 +178,27 @@ enum XtkErrorCode {
     XTK_ERR_NONFINITE        = 0x001B,
     XTK_ERR_QUEUE_SATURATED  = 0x001C,
     XTK_ERR_TIMEOUT          = 0x001D,
-    XTK_ERR_UNAUTHORIZED_OP  = 0x001E
+    XTK_ERR_UNAUTHORIZED_OP  = 0x001E,
+
+    /* v1.1 additions (P3.3). */
+    XTK_ERR_STALE_LIFE       = 0x001F,  /* entity-life generation is stale  */
+    XTK_ERR_DUPLICATE_NAME   = 0x0020,  /* lobby name already in use        */
+    XTK_ERR_NOT_READY        = 0x0021,  /* start requested before all ready */
+    XTK_ERR_STALE_CONFIG     = 0x0022   /* config revision has moved on     */
 };
 
 /* ======================================================================
- * Codec API (P2.3)
+ * Codec API (P2.3; extended to v1.1 by P3.3)
  *
- * The codec is a bounded, allocation-free serializer for the frozen v1
+ * The codec is a bounded, allocation-free serializer for the frozen v1.1
  * schema.  It uses only Protocol/ headers and never touches the engine,
  * SDL, ENet or the simulation.  All integers/floats are written explicitly
  * in network byte order (big-endian); no native struct is copied and the
  * host's byte order cannot change a single output octet.
+ *
+ * The codec emits and accepts exactly version 1.1.  A 1.0 envelope is
+ * rejected (XTK_ERR_VERSION_MISMATCH) with no fallback; there is no
+ * dual-version path (D3-A).
  * ====================================================================== */
 
 /* ---- Primitive big-endian serialization ------------------------------ */
@@ -195,8 +225,8 @@ int32_t  xtk_load_i32(const uint8_t *p);
 int      xtk_load_f64(const uint8_t *p, double *out);
 
 /* Canonical transport channel for a message type (0/1/2), or 0xFF if the
- * type is not part of protocol v1.  Used by encode to assign the channel and
- * by decode to reject a message delivered on the wrong channel. */
+ * type is not part of protocol v1.1.  Used by encode to assign the channel
+ * and by decode to reject a message delivered on the wrong channel. */
 uint8_t  xtk_next_channel(uint8_t message_type);
 
 /* ---- Decoded message shapes (host-native; never transmitted raw) ----- */
@@ -229,8 +259,9 @@ typedef struct {
 typedef struct {
     uint32_t server_nonce;
     uint8_t  role;
-    uint8_t  tick_hz;
-    uint8_t  max_players;
+    uint8_t  tick_hz;          /* XTK_SERVER_TICK_HZ                       */
+    uint8_t  max_players;      /* vehicle preset bound (XTK_MAX_PLAYERS)   */
+    uint8_t  human_capacity;   /* admitted human controllers (<= 2)        */
     uint8_t  reserved;
 } XtkWelcome;
 
@@ -256,29 +287,50 @@ typedef struct {
 typedef struct {
     uint16_t maze_id;
     uint16_t vehicle_id;
-    uint32_t reserved;
+    uint8_t  drone_count;      /* 0 .. XTK_MAX_DRONES */
+    uint8_t  reserved;
+    uint16_t reserved2;
+    uint32_t reserved3;
 } XtkConfigSelect;
 
 typedef struct {
     uint16_t maze_id;
     uint16_t vehicle_id;
-    uint16_t status;
-    uint16_t error_code;
+    uint8_t  drone_count;
+    uint8_t  reserved;
+    uint16_t status;           /* 0 accepted                              */
+    uint16_t error_code;       /* XTK_ERR_*                               */
+    uint16_t reserved2;
+    uint32_t config_revision;  /* server config revision                  */
 } XtkConfigStatus;
+
+typedef struct {
+    uint8_t  ready;            /* 0 unready, 1 ready against revision      */
+    uint8_t  reserved;
+    uint16_t reserved2;
+    uint32_t config_revision;
+} XtkReady;
 
 typedef struct {
     uint32_t start_tick;
     uint16_t maze_id;
-    uint8_t  vehicle_id;
+    uint16_t vehicle_id;       /* full-width content id (v1.1)            */
+    uint8_t  drone_count;
     uint8_t  reserved;
+    uint16_t reserved2;
+    uint32_t config_revision;
 } XtkStart;
+
+typedef struct { uint32_t expected_config_revision; uint32_t reserved; }
+    XtkStartRequest;
 
 typedef struct { uint32_t epoch; uint32_t first_tick; } XtkEpochBegin;
 
 typedef struct {
     uint8_t  slot;
-    uint8_t  generation;
+    uint8_t  flags;            /* XTK_FLAG_DEPARTED                       */
     uint16_t reserved;
+    uint32_t generation;       /* u32 entity-life generation (v1.1)       */
     uint32_t score;
     char     name[XTK_MAX_NAME_BYTES + 1];
 } XtkResultEntry;
@@ -295,7 +347,32 @@ typedef struct {
 typedef struct { uint32_t prior_epoch; uint32_t reserved; } XtkReset;
 
 typedef struct {
-    uint32_t event_sequence;
+    uint32_t connection_id;    /* stable connection identity              */
+    uint32_t controller_id;    /* stable controller identity              */
+    uint8_t  slot;             /* bound vehicle slot; 0xFF = unbound      */
+    uint8_t  ready;
+    uint8_t  flags;            /* XTK_FLAG_DEPARTED                       */
+    uint8_t  departure_reason; /* XTK_ERR_*; 0 = none                     */
+    char     name[XTK_MAX_NAME_BYTES + 1];
+} XtkRosterEntry;
+
+typedef struct {
+    uint32_t config_revision;
+    uint8_t  session_state;    /* enum XtkSessionState                    */
+    uint8_t  drone_count;
+    uint16_t maze_id;
+    uint16_t vehicle_id;
+    uint8_t  self_index;       /* recipient roster index; 0xFF = none     */
+    uint8_t  admin_index;      /* admin roster index; 0xFF = none         */
+    uint8_t  human_count;      /* 0 .. XTK_LOBBY_ROSTER_MAX               */
+    uint8_t  reserved;
+    uint16_t reserved2;
+    XtkRosterEntry entry[XTK_LOBBY_ROSTER_MAX];
+} XtkLobbyStatus;
+
+typedef struct {
+    uint32_t event_sequence;   /* per recipient, per epoch, from 0        */
+    uint32_t capture_tick;     /* engine tick the event occurred          */
     uint8_t  event_type;
     uint8_t  entity_kind;
     uint16_t entity_id;
@@ -330,8 +407,9 @@ typedef struct {
 typedef struct {
     uint32_t command_id;
     uint32_t tick_hint;
+    uint32_t life_generation;  /* controlled entity-life generation (v1.1) */
     uint8_t  op;
-    uint8_t  flags;
+    uint8_t  flags;            /* XTK_FLAG_EDGE / _HELD / _RELIABLE        */
     uint16_t reserved;
     double   a;
     double   b;
@@ -354,7 +432,7 @@ typedef struct {
 
 typedef struct {
     uint8_t  slot;
-    uint8_t  generation;
+    uint8_t  reserved;
     uint16_t lifecycle_flags;
     uint16_t armor[XTK_ARMOR_SIDES];
     uint16_t fuel;
@@ -364,12 +442,13 @@ typedef struct {
     uint8_t  weapon_enabled_bitmap;
     uint8_t  weapon_count;
     uint16_t reload[XTK_MAX_WEAPONS];
-    uint8_t  reserved[2];
+    uint32_t generation;       /* u32 entity-life generation (v1.1)       */
+    uint8_t  reserved2[2];
 } XtkSelfState;
 
 typedef struct {
     uint8_t  slot;
-    uint8_t  generation;
+    uint8_t  reserved;
     uint8_t  kind;
     uint8_t  flags;
     double   x;
@@ -378,7 +457,8 @@ typedef struct {
     double   turret_angle;
     uint16_t body_picture;
     uint16_t turret_picture;
-    uint8_t  reserved[4];
+    uint32_t generation;       /* u32 entity-life generation (v1.1)       */
+    uint8_t  reserved2[4];
 } XtkVehicleView;
 
 typedef struct {
@@ -388,9 +468,10 @@ typedef struct {
     double   y;
     double   heading;
     uint8_t  owner_slot;
-    uint8_t  owner_generation;
     uint8_t  kind;
-    uint8_t  reserved;
+    uint16_t reserved;
+    uint32_t generation;       /* bullet life generation (v1.1)           */
+    uint32_t owner_generation; /* u32 owner-life generation (v1.1)        */
 } XtkBulletView;
 
 typedef struct {
@@ -399,6 +480,7 @@ typedef struct {
     uint8_t  flags;
     double   x;
     double   y;
+    uint32_t generation;       /* explosion life generation (v1.1)        */
     uint8_t  reserved[4];
 } XtkExplosionView;
 
@@ -411,11 +493,14 @@ typedef struct {
 
 typedef struct {
     uint8_t  kind;
-    uint8_t  id;
-    uint16_t reserved;
+    uint8_t  grid_x;           /* full grid key (v1.1)                    */
+    uint8_t  grid_y;
+    uint8_t  reserved;
     double   x;
     double   y;
-    uint8_t  reserved2[4];
+    uint16_t id;               /* full-width landmark id (v1.1)           */
+    uint16_t reserved2;
+    uint8_t  reserved3[4];
 } XtkLandmarkView;
 
 typedef struct {
@@ -429,9 +514,10 @@ typedef struct {
 typedef struct {
     uint32_t snapshot_sequence;
     uint32_t server_tick;
-    uint16_t flags;
+    uint16_t flags;            /* XTK_FLAG_KEYFRAME                       */
     uint8_t  own_slot;
-    uint8_t  own_generation;
+    uint8_t  reserved;
+    uint32_t own_generation;   /* u32 entity-life generation (v1.1)       */
     uint16_t vehicle_count;
     uint16_t bullet_count;
     uint16_t explosion_count;
@@ -439,7 +525,7 @@ typedef struct {
     uint16_t landmark_count;
     uint8_t  radar_blip_count;
     uint8_t  weapon_count;
-    uint32_t map_revision;
+    uint32_t map_revision;     /* recipient-local mapper metadata (D3-C)  */
     XtkSelfState      self;
     XtkVehicleView    vehicle[XTK_MAX_VEHICLES];
     XtkBulletView     bullet[XTK_MAX_BULLETS];
@@ -451,7 +537,7 @@ typedef struct {
 
 /* One decoded message: the envelope plus a typed body selected by
  * env.message_type.  The body is stored inline (no pointer, no allocation);
- * the fixed array bounds make the struct a little under 32 KiB. */
+ * the fixed array bounds make the struct a little under 34 KiB. */
 typedef union {
     XtkPing          ping;
     XtkHello         hello;
@@ -460,8 +546,11 @@ typedef union {
     XtkCatalog       catalog;
     XtkConfigSelect  config_select;
     XtkConfigStatus  config_status;
+    XtkReady         ready;
     XtkStart         start;
+    XtkStartRequest  start_request;
     XtkEpochBegin    epoch_begin;
+    XtkLobbyStatus    lobby_state;
     XtkResults       results;
     XtkReset         reset;
     XtkEvent         event;
@@ -469,7 +558,7 @@ typedef union {
     XtkProtocolError protocol_error;
     XtkReliableCmd   reliable_cmd;
     XtkInputBatch    input_batch;
-    XtkViewSnapshot  view_snapshot;
+    XtkViewSnapshot  view_snapshot;   /* also VIEW_KEYFRAME */
 } XtkMessageBody;
 
 typedef struct {
