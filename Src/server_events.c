@@ -73,27 +73,46 @@ static uint8_t score_valid[MAX_VEHICLES];
 static int have_frame;
 static int last_frame;
 
-static XtkEvent events[SERVER_EVENTS_MAX];
+/*
+** P3.8 retirement ring.  `pub` is the wire DTO; the sidecar carries the
+** export-only occurrence location used by the recipient authorization table
+** (EXPLOSION / RESPAWN).  `next_ordinal` is the monotonic per-epoch ordinal
+** of the next event; `event_count` is the number of retained entries, so the
+** oldest retained ordinal is next_ordinal - event_count.  A full ring
+** overwrites (retires) its oldest entry.
+*/
+typedef struct {
+	XtkEvent pub;
+	uint8_t has_loc;
+	double lx, ly;
+} ServerEventEntry;
+
+static ServerEventEntry ring[SERVER_EVENTS_RING];
 static int event_count;
-static uint32_t next_seq;
+static uint32_t next_ordinal;
 
 static XtkResults results;
 static int results_valid;
 
 /* ---- helpers ---------------------------------------------------------- */
 
-static void
+static ServerEventEntry *
 emit(uint8_t type, uint8_t kind, uint16_t id, uint32_t gen,
      uint32_t aux0, uint32_t aux1, const char *text)
 {
+	ServerEventEntry *ent;
 	XtkEvent *e;
+	uint32_t ordinal = next_ordinal++;
 
-	if (event_count >= SERVER_EVENTS_MAX)
-		return;			/* bounded: drop beyond the ring */
+	/* Ring slot for this ordinal; a full ring retires its oldest entry. */
+	ent = &ring[ordinal % SERVER_EVENTS_RING];
+	(void) memset(ent, 0, sizeof(*ent));
+	if (event_count < SERVER_EVENTS_RING)
+		event_count++;
 
-	e = &events[event_count++];
-	(void) memset(e, 0, sizeof(*e));
-	e->event_sequence = next_seq++;
+	e = &ent->pub;
+	e->event_sequence = ordinal;	/* per-epoch capture ordinal */
+	e->capture_tick = (uint32_t) frame;	/* occurrence tick */
 	e->event_type = type;
 	e->entity_kind = kind;
 	e->entity_id = id;
@@ -104,6 +123,7 @@ emit(uint8_t type, uint8_t kind, uint16_t id, uint32_t gen,
 		(void) strncpy(e->text, text, XTK_MAX_NAME_BYTES);
 		e->text[XTK_MAX_NAME_BYTES] = '\0';
 	}
+	return ent;
 }
 
 static uint8_t
@@ -134,8 +154,9 @@ server_events_reset(uint32_t epoch, uint32_t first_tick)
 
 	have_frame = 0;
 	last_frame = 0;
+	(void) memset(ring, 0, sizeof(ring));
 	event_count = 0;
-	next_seq = 0;
+	next_ordinal = 0;
 	results_valid = 0;
 	(void) memset(&results, 0, sizeof(results));
 }
@@ -151,26 +172,52 @@ server_events_epoch(void)
 void
 server_events_note_death(int victim_slot, int killer_slot)
 {
+	ServerEventEntry *ent;
+	Vehicle *victim;
+	double x = 0.0, y = 0.0;
+	uint8_t has_loc = 0;
+
 	if (victim_slot < 0 || victim_slot >= MAX_VEHICLES)
 		return;
 
-	emit(XTK_EV_DEATH, XTK_ENTITY_VEHICLE, (uint16_t) victim_slot,
-	     veh_gen[victim_slot],
-	     (killer_slot >= 0) ? (uint32_t) killer_slot : UINT32_MAX, 0, NULL);
+	/*
+	 * Export-side occurrence location (read-only): the victim's death-point
+	 * Loc while it is still valid.  Used only for recipient authorization.
+	 */
+	victim = combatant[victim_slot].vehicle;
+	if (victim != (Vehicle *) NULL && victim->loc != (Loc *) NULL) {
+		x = (double) victim->loc->x;
+		y = (double) victim->loc->y;
+		has_loc = 1;
+	}
+
+	ent = emit(XTK_EV_DEATH, XTK_ENTITY_VEHICLE, (uint16_t) victim_slot,
+		   veh_gen[victim_slot],
+		   (killer_slot >= 0) ? (uint32_t) killer_slot : UINT32_MAX, 0,
+		   NULL);
+	ent->has_loc = has_loc;
+	ent->lx = x;
+	ent->ly = y;
 }
 
 void
 server_events_note_spawn(int slot, double x, double y)
 {
+	ServerEventEntry *ent;
+
 	if (slot < 0 || slot >= MAX_VEHICLES)
 		return;
 
 	/* Dedicated export-side lifetime counter: every new life advances it. */
 	veh_gen[slot]++;
 
-	if (veh_seen[slot])
-		emit(XTK_EV_RESPAWN, XTK_ENTITY_VEHICLE, (uint16_t) slot,
-		     veh_gen[slot], (uint32_t) x, (uint32_t) y, NULL);
+	if (veh_seen[slot]) {
+		ent = emit(XTK_EV_RESPAWN, XTK_ENTITY_VEHICLE, (uint16_t) slot,
+			   veh_gen[slot], (uint32_t) x, (uint32_t) y, NULL);
+		ent->has_loc = 1;
+		ent->lx = x;
+		ent->ly = y;
+	}
 	veh_seen[slot] = 1;
 }
 
@@ -193,7 +240,8 @@ server_events_capture_results(int status, int winner_slot)
 		if (len > XTK_MAX_NAME_BYTES)
 			len = XTK_MAX_NAME_BYTES;
 		re->slot = (uint8_t) c->number;
-		re->generation = (uint8_t) veh_gen[c->number];
+		/* Full-width u32 entity-life generation (D3-C). */
+		re->generation = veh_gen[c->number];
 		re->score = (uint32_t) c->score;
 		(void) memset(re->name, 0, sizeof(re->name));
 		(void) memcpy(re->name, c->name, len);
@@ -278,10 +326,15 @@ observe_explosions(void)
 		    ((unsigned long) (unsigned) e->color << 8);
 		seen[idx] = 1;
 		if (!exp_present[idx] || exp_sig[idx] != sig) {
+			ServerEventEntry *ent;
+
 			exp_gen[idx]++;		/* new transient */
-			emit(XTK_EV_EXPLOSION, XTK_ENTITY_EXPLOSION,
-			     (uint16_t) idx, exp_gen[idx],
-			     (uint32_t) explosion_kind(e), 0, NULL);
+			ent = emit(XTK_EV_EXPLOSION, XTK_ENTITY_EXPLOSION,
+				   (uint16_t) idx, exp_gen[idx],
+				   (uint32_t) explosion_kind(e), 0, NULL);
+			ent->has_loc = 1;
+			ent->lx = (double) e->x;
+			ent->ly = (double) e->y;
 		}
 		exp_present[idx] = 1;
 		exp_sig[idx] = sig;
@@ -330,9 +383,92 @@ server_events_count(void)
 const XtkEvent *
 server_events_event(int index)
 {
+	uint32_t first;
+
 	if (index < 0 || index >= event_count)
 		return (const XtkEvent *) NULL;
-	return &events[index];
+	first = next_ordinal - (uint32_t) event_count;
+	return &ring[(first + (uint32_t) index) % SERVER_EVENTS_RING].pub;
+}
+
+uint32_t
+server_events_first_ordinal(void)
+{
+	return next_ordinal - (uint32_t) event_count;
+}
+
+uint32_t
+server_events_next_ordinal(void)
+{
+	return next_ordinal;
+}
+
+const XtkEvent *
+server_events_event_at(uint32_t ordinal)
+{
+	if (ordinal < server_events_first_ordinal() || ordinal >= next_ordinal)
+		return (const XtkEvent *) NULL;
+	return &ring[ordinal % SERVER_EVENTS_RING].pub;
+}
+
+/*
+** The reference animation viewport (docs/VIEW-v1.md section 3), duplicated
+** read-only from the exporter so recipient authorization uses the identical
+** half-open world-space rule.
+*/
+static int
+event_in_view(double own_x, double own_y, double x, double y)
+{
+	double half = (double) (ANIM_WIN_WIDTH / 2);
+	double dx = x - own_x;
+	double dy = y - own_y;
+
+	return dx >= -half && dx < half && dy >= -half && dy < half;
+}
+
+int
+server_events_authorized(uint32_t ordinal, int own_slot,
+			 double own_x, double own_y)
+{
+	const ServerEventEntry *ent;
+	const XtkEvent *e;
+
+	if (ordinal < server_events_first_ordinal() || ordinal >= next_ordinal)
+		return 0;
+	ent = &ring[ordinal % SERVER_EVENTS_RING];
+	e = &ent->pub;
+
+	switch (e->event_type) {
+	  case XTK_EV_SCORE:
+		/* SELF: own score only, remote score is public only at RESULTS. */
+		return own_slot >= 0 && (int) e->entity_id == own_slot;
+
+	  case XTK_EV_DEATH:
+		/* Participants: the victim and (when present) the killer. */
+		if (own_slot >= 0 && (int) e->entity_id == own_slot)
+			return 1;
+		return own_slot >= 0 && e->aux0 != UINT32_MAX &&
+		       (int) e->aux0 == own_slot;
+
+	  case XTK_EV_RESPAWN:
+		/* Own respawn always; a remote spawn only inside the viewport. */
+		if (own_slot >= 0 && (int) e->entity_id == own_slot)
+			return 1;
+		return ent->has_loc &&
+		       event_in_view(own_x, own_y, ent->lx, ent->ly);
+
+	  case XTK_EV_EXPLOSION:
+		/* A transient is visible only inside the reference viewport. */
+		return ent->has_loc &&
+		       event_in_view(own_x, own_y, ent->lx, ent->ly);
+
+	  case XTK_EV_MATCH_END:
+		/* Public winner/result marker. */
+		return 1;
+
+	  default:
+		return 0;
+	}
 }
 
 int
