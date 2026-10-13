@@ -19,6 +19,21 @@
  *   - Reliable output queued for a peer is reported so the caller can abort a
  *     saturated peer instead of buffering forever.
  *
+ * P3.9 additions (docs/PHASE3-DECISIONS.md D3-F):
+ *
+ *   - Channel 0 is reliable ordered.  Channels 1 and 2 are unreliable
+ *     *sequenced* and are sent with ENet's unreliable-fragment flag, so an
+ *     oversized snapshot is fragmented and reassembled by ENet without ever
+ *     being silently downgraded to the reliable backlog (a packet that does
+ *     not fully reassemble is discarded, never partially applied).
+ *   - A peer's receive wrapper is released (and any undelivered queued copy of
+ *     its traffic purged) when its disconnect is observed, so repeated
+ *     connect/disconnect cycles reuse pool slots instead of exhausting them
+ *     and a reused wrapper never aliases the previous connection's traffic.
+ *   - The total queued ENet output for a peer is measurable
+ *     (transport_peer_outgoing_bytes) so the caller can keep the actual ENet
+ *     per-peer queue inside the approved bound.
+ *
  * All functions must be called from one thread (the simulation thread).
  */
 
@@ -48,6 +63,11 @@ typedef struct {
 	unsigned long service_calls;
 	unsigned long service_events;
 	unsigned long service_max_events;
+	/* P3.9 bounded-work/lifetime evidence. */
+	unsigned long wrappers_released;	/* disconnect wrappers freed  */
+	unsigned long wrappers_reused;		/* pool slots handed out again */
+	unsigned long rx_queue_max;		/* high-water rx queue depth  */
+	unsigned long unreliable_fragments;	/* ch1/2 packets over one MTU */
 } TransportStats;
 
 /*
@@ -99,8 +119,10 @@ int transport_receive(Transport *t, TransportPeer **peer, uint8_t *out,
 
 /*
  * Queue `len` bytes on `channel` for `peer`.  Channel 0 is reliable ordered;
- * channels 1 and 2 are unreliable sequenced.  Returns 0 on success, -1 on a
- * bad argument or a send failure.  Data is copied by the transport.
+ * channels 1 and 2 are unreliable sequenced (D3-F: an oversized packet is
+ * fragmented with ENet's unreliable-fragment flag and never downgraded to the
+ * reliable backlog).  Returns 0 on success, -1 on a bad argument or a send
+ * failure.  Data is copied by the transport.
  */
 int transport_send(Transport *t, TransportPeer *peer, uint8_t channel,
 		   const void *data, size_t len);
@@ -111,6 +133,14 @@ int transport_send(Transport *t, TransportPeer *peer, uint8_t channel,
  * (XTK_MAX_RELIABLE_QUEUE_BYTES) rather than buffering without bound.
  */
 size_t transport_peer_reliable_bytes(Transport *t, TransportPeer *peer);
+
+/*
+ * Bytes of ENet output still queued or in flight for `peer` across every
+ * channel (reliable + unreliable).  This is the actual per-peer ENet queue
+ * size, independent of the application layer; callers use it to record and
+ * bound the real transport memory footprint (P3.9).
+ */
+size_t transport_peer_outgoing_bytes(Transport *t, TransportPeer *peer);
 
 /* 1 while `peer` is connected (a CONNECT was seen and no DISCONNECT yet). */
 int transport_peer_connected(Transport *t, TransportPeer *peer);
