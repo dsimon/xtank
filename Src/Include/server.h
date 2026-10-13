@@ -43,6 +43,8 @@
 #ifndef _SERVER_H_
 #define _SERVER_H_
 
+#include <stdint.h>
+
 #include "tanktypes.h"
 #include "tanklimits.h"
 #include "team.h"
@@ -95,7 +97,11 @@ const char *server_player_name(int terminal_index);
  * through terminal[c->player[i]].  A terminal-free (network/local server)
  * human is instead an explicit binding owned by the server:
  *
- *   controller  a stable controller/session id (NOT a terminal slot),
+ *   controller  a stable, full-width (u32) controller/connection id (NOT a
+ *               terminal slot).  It is deliberately unsigned so a controller
+ *               id never acquires a spurious sign through an `int` cast; the
+ *               release assigns ids in a bounded, never-negative range and
+ *               the wire roster carries the same u32 identity,
  *   slot        the combatant/vehicle index the controller drives,
  *   generation  bumped whenever the binding is (re)bound to a slot, so a
  *               respawned or reassigned slot cannot be driven by a stale
@@ -110,7 +116,7 @@ const char *server_player_name(int terminal_index);
 
 typedef struct {
 	int used;
-	int controller;			/* stable controller/connection id */
+	uint32_t controller;		/* stable full-width controller/connection id */
 	unsigned int generation;	/* bumped on (re)bind */
 	int slot;			/* combatant/vehicle index, -1 unbound */
 	char name[MAX_STRING + 1];
@@ -120,12 +126,13 @@ typedef struct {
 void server_players_init(void);
 
 /*
- * Register a named human controlled by `controller` (>= 0).  Returns the
- * binding index, or -1 on a full table, a NULL/empty name, a duplicate name or
- * a duplicate controller.  The new binding starts unbound (slot -1),
- * generation 1.
+ * Register a named human controlled by `controller`.  Returns the binding
+ * index, or -1 on a full table, a NULL/empty name, a duplicate name or a
+ * duplicate controller.  The controller id is the full-width u32 identity the
+ * session assigns; it is never narrowed to a signed int.  The new binding
+ * starts unbound (slot -1), generation 1.
  */
-int server_players_add(const char *name, int controller);
+int server_players_add(const char *name, uint32_t controller);
 
 /* Number of registered human bindings and read-only access to one. */
 int server_players_count(void);
@@ -158,10 +165,13 @@ const char *server_players_name_for_slot(int slot);
 
 /*
  * Controller ownership check.  Returns 1 only when `controller` owns `slot`
- * with exactly `generation`; a stale generation or a different slot is 0.
- * A negative generation means "ignore generation".
+ * with exactly `generation`; a stale generation, a different slot or a
+ * boundary id that names no live binding (for example 0xFFFFFFFF or
+ * 0x80000000 when unused) is 0.  A negative generation means "ignore
+ * generation".
  */
-int server_players_validate(int controller, int slot, unsigned int generation);
+int server_players_validate(uint32_t controller, int slot,
+			    unsigned int generation);
 
 /* 1 when at least one terminal-free human binding is registered. */
 int server_players_active(void);
@@ -207,6 +217,27 @@ void server_match_reset(void);
 void server_destroy(void);
 
 /*
+ * Departure removal (P3.7; contract in P3.2-REPORT.md and PHASE3-PLAN.md P3.7).
+ *
+ * server_depart_vehicle() removes one departed combatant's vehicle from the
+ * live/dead lists with no kill/score/death/RNG/explosion side effect.  A live
+ * vehicle is inactivated with the existing inactivate_vehicle() (which clears
+ * its alive flag, kills program threads, detaches its terminal and clears its
+ * map occupancy flag); a respawn-waiting vehicle simply leaves the dead list.
+ * The vehicle's storage is retained until the normal match reset so any
+ * outstanding projectile that still points at it (Bullet.owner and the disc /
+ * special references) stays valid and follows the unchanged projectile rules.
+ * Team data, scores, kills, deaths and every game rule are left untouched.
+ * Idempotent; `slot` is the vehicle/combatant number.
+ *
+ * server_slot_departed() reports whether a combatant slot has departed the
+ * current match (used to mark retained score/name result records).
+ */
+void server_depart_vehicle(int slot);
+int server_slot_departed(int slot);
+int server_departed_count(void);
+
+/*
  * Display-free match result (P1.14): finalize/report the result and reset
  * per-match scores with no graphical stats wait or event loop.
  */
@@ -232,6 +263,7 @@ void server_tick_pace(void);
  * match with absolute 1/tick_hz deadlines and reports bounded per-tick work.
  */
 void server_loop_configure(int hz);
+void server_loop_epoch_begin(void);
 int server_loop_active(void);
 int server_loop_hz(void);
 long server_loop_ticks(void);
