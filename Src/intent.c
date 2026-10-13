@@ -109,6 +109,42 @@ intent_init(void)
 }
 
 /*
+ * Player-scoped cancel (P3.7 departure).  Unlike intent_reset(), this touches
+ * only the departing controller: every other controller keeps its queued
+ * intents and held controls, so the surviving human is unaffected.
+ */
+void
+intent_cancel_player(int player)
+{
+	int i, w = 0;
+
+	if (player < 0 || player >= INTENT_MAX_PLAYERS)
+		return;
+
+	/* Drop only this controller's queued intents; later ticks included. */
+	for (i = 0; i < qcount; i++)
+		if (queue[i].player != player)
+			queue[w++] = queue[i];
+	qcount = w;
+
+	/* Clear this controller's held controls. */
+	held_aim[player] = -1;
+	held_chase[player] = -1;
+	held_chase_drive[player] = 9.0;
+	held_standoff[player] = -1;
+	held_standoff_dist[player] = 200.0;
+	held_fire[player] = 0;
+
+	/* Reset the anti-wedge bookkeeping for this vehicle number. */
+	if (player < MAX_VEHICLES) {
+		dw_valid[player] = 0;
+		dw_stuck[player] = 0;
+		dw_px[player] = 0.0;
+		dw_py[player] = 0.0;
+	}
+}
+
+/*
 ** Reject an intent that is malformed, belongs to no controller, or names a
 ** target that is not a vehicle in this world.  Held-release values (-1) are
 ** valid and mean "stop applying".
