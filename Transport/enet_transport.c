@@ -27,6 +27,7 @@
 struct TransportPeer {
 	ENetPeer *enet;
 	int connected;
+	int used_once;		/* pool slot has already carried a wrapper */
 };
 
 typedef struct {
@@ -54,23 +55,24 @@ struct Transport {
 
 static int enet_ready;
 
-/* Locate (or, for a connect, create) the wrapper for an ENet peer. */
+/*
+ * Claim a free pool slot for `ep` (used by inbound CONNECT and by an explicit
+ * outgoing connect).  A slot that already carried a wrapper is counted as a
+ * reuse, which is the P3.9 evidence that connect/disconnect cycles recycle
+ * wrappers instead of exhausting the pool.
+ */
 static TransportPeer *
-peer_wrap(Transport *t, ENetPeer *ep, int create)
+pool_claim(Transport *t, ENetPeer *ep)
 {
 	int i;
 
-	if (ep == (ENetPeer *) NULL)
-		return (TransportPeer *) NULL;
-	if (ep->data != NULL)
-		return (TransportPeer *) ep->data;
-	if (!create)
-		return (TransportPeer *) NULL;
-
 	for (i = 0; i < t->pool_cap; i++) {
 		if (t->pool[i].enet == (ENetPeer *) NULL) {
+			if (t->pool[i].used_once)
+				t->stats.wrappers_reused++;
 			t->pool[i].enet = ep;
 			t->pool[i].connected = 0;
+			t->pool[i].used_once = 1;
 			ep->data = &t->pool[i];
 			return &t->pool[i];
 		}
@@ -78,8 +80,28 @@ peer_wrap(Transport *t, ENetPeer *ep, int create)
 	return (TransportPeer *) NULL;
 }
 
+/* Locate (or, for a connect, create) the wrapper for an ENet peer. */
+static TransportPeer *
+peer_wrap(Transport *t, ENetPeer *ep, int create)
+{
+	if (ep == (ENetPeer *) NULL)
+		return (TransportPeer *) NULL;
+	if (ep->data != NULL)
+		return (TransportPeer *) ep->data;
+	if (!create)
+		return (TransportPeer *) NULL;
+	return pool_claim(t, ep);
+}
+
+/*
+ * Release a wrapper back to the pool.  The ENet peer is unbound first so a
+ * later ENet peer that reuses the same address can never resolve to this
+ * wrapper's old connection; the wrapper pointer itself stays valid until the
+ * pool slot is handed out again, so a caller still holding it can map it to
+ * its own peer record.
+ */
 static void
-peer_release(TransportPeer *p)
+peer_release(Transport *t, TransportPeer *p)
 {
 	if (p == (TransportPeer *) NULL)
 		return;
@@ -87,6 +109,31 @@ peer_release(TransportPeer *p)
 		p->enet->data = NULL;
 	p->enet = (ENetPeer *) NULL;
 	p->connected = 0;
+	t->stats.wrappers_released++;
+}
+
+/*
+ * Drop every not-yet-delivered received copy that belongs to `p`.  Called when
+ * the wrapper is released: the connection is gone, so its queued traffic must
+ * not be delivered later (which would let a reused wrapper deliver a previous
+ * connection's bytes).
+ */
+static void
+rx_purge_peer(Transport *t, TransportPeer *p)
+{
+	int i;
+
+	for (i = 0; i < TRANSPORT_RX_QUEUE_MAX; i++) {
+		RxEntry *e = &t->rx[i];
+
+		if (e->data != NULL && e->peer == p) {
+			free(e->data);
+			e->data = NULL;
+			e->len = 0;
+			e->peer = (TransportPeer *) NULL;
+			t->stats.dropped_rx++;
+		}
+	}
 }
 
 static void
@@ -181,9 +228,9 @@ transport_port(Transport *t)
 TransportPeer *
 transport_connect(Transport *t, const char *host, uint16_t port)
 {
-	TransportPeer *p = (TransportPeer *) NULL;
+	TransportPeer *p;
+	ENetPeer *ep;
 	ENetAddress addr;
-	int i;
 
 	if (t == (Transport *) NULL || host == (const char *) NULL)
 		return (TransportPeer *) NULL;
@@ -191,20 +238,15 @@ transport_connect(Transport *t, const char *host, uint16_t port)
 		return (TransportPeer *) NULL;
 	addr.port = port;
 
-	for (i = 0; i < t->pool_cap; i++)
-		if (t->pool[i].enet == (ENetPeer *) NULL) {
-			p = &t->pool[i];
-			break;
-		}
-	if (p == (TransportPeer *) NULL)
+	ep = enet_host_connect(t->host, &addr, TRANSPORT_CHANNELS, 0);
+	if (ep == (ENetPeer *) NULL)
 		return (TransportPeer *) NULL;
-
-	p->enet = enet_host_connect(t->host, &addr, TRANSPORT_CHANNELS, 0);
-	if (p->enet == (ENetPeer *) NULL) {
-		peer_release(p);
+	p = pool_claim(t, ep);
+	if (p == (TransportPeer *) NULL) {
+		/* No wrapper slot: never leave a half-tracked ENet peer. */
+		enet_peer_disconnect_now(ep, 0);
 		return (TransportPeer *) NULL;
 	}
-	p->enet->data = p;
 	p->connected = 0;
 	return p;
 }
@@ -271,6 +313,10 @@ transport_service(Transport *t, int budget)
 					t->rx[idx].len = len;
 					t->rx[idx].data = copy;
 					t->rx_count++;
+					if ((unsigned long) t->rx_count >
+					    t->stats.rx_queue_max)
+						t->stats.rx_queue_max =
+							(unsigned long) t->rx_count;
 					t->stats.packets_rx++;
 					t->stats.bytes_rx += len;
 				} else {
@@ -305,10 +351,24 @@ transport_poll_connect(Transport *t, TransportPeer **peer)
 int
 transport_poll_disconnect(Transport *t, TransportPeer **peer)
 {
+	int got;
+
 	if (t == (Transport *) NULL)
 		return 0;
-	return q_pop(t->disc_q, &t->disc_head, &t->disc_count, t->pool_cap,
-		     peer);
+	got = q_pop(t->disc_q, &t->disc_head, &t->disc_count, t->pool_cap,
+		    peer);
+	if (got) {
+		/*
+		 * The connection is over: purge any undelivered copy of its
+		 * traffic and return the wrapper to the pool.  The returned
+		 * pointer stays valid for the caller's peer lookup until the
+		 * slot is handed out again, but no longer resolves to the dead
+		 * ENet peer.
+		 */
+		rx_purge_peer(t, *peer);
+		peer_release(t, *peer);
+	}
+	return got;
 }
 
 int
@@ -355,7 +415,21 @@ transport_send(Transport *t, TransportPeer *peer, uint8_t channel,
 	if (len > TRANSPORT_MAX_PACKET)
 		return -1;
 
-	flags = (channel == 0) ? ENET_PACKET_FLAG_RELIABLE : 0;
+	/*
+	 * D3-F: channel 0 is reliable ordered; channels 1 and 2 are unreliable
+	 * sequenced and use ENet's unreliable-fragment flag.  Without the flag
+	 * ENet would send an oversized unreliable packet as reliable
+	 * SEND_FRAGMENT+ACK commands, silently turning a dropped view into a
+	 * retransmitted reliable backlog.  With it, a snapshot that does not
+	 * fully reassemble is discarded whole -- never partially applied.
+	 */
+	if (channel == 0)
+		flags = ENET_PACKET_FLAG_RELIABLE;
+	else
+		flags = ENET_PACKET_FLAG_UNRELIABLE_FRAGMENT;
+	if (channel != 0 && peer->enet->mtu > 0 &&
+	    len > (size_t) peer->enet->mtu)
+		t->stats.unreliable_fragments++;
 	pkt = enet_packet_create(data, len, flags);
 	if (pkt == (ENetPacket *) NULL)
 		return -1;
@@ -399,6 +473,25 @@ transport_peer_reliable_bytes(Transport *t, TransportPeer *peer)
 	 * other queued commands wait in outgoingCommands; reliableDataInTransit
 	 * counts the fragments already on the wire awaiting acknowledgement. */
 	return (size_t) p->reliableDataInTransit +
+	       list_bytes(&p->outgoingSendReliableCommands) +
+	       list_bytes(&p->outgoingCommands);
+}
+
+size_t
+transport_peer_outgoing_bytes(Transport *t, TransportPeer *peer)
+{
+	ENetPeer *p;
+
+	if (t == (Transport *) NULL || peer == (TransportPeer *) NULL ||
+	    peer->enet == (ENetPeer *) NULL)
+		return 0;
+	p = peer->enet;
+	/* Every not-yet-removed command for this peer, reliable or not, plus
+	 * the reliable bytes already on the wire awaiting acknowledgement.  An
+	 * unreliable command is removed as soon as it is written to the socket,
+	 * so this reflects the true per-peer ENet queue footprint. */
+	return (size_t) p->reliableDataInTransit +
+	       list_bytes(&p->sentReliableCommands) +
 	       list_bytes(&p->outgoingSendReliableCommands) +
 	       list_bytes(&p->outgoingCommands);
 }
