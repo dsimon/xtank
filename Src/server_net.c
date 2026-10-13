@@ -16,6 +16,7 @@
 #include "server.h"
 #include "intent.h"
 #include "server_net.h"
+#include "server_events.h"
 
 /* Ack log ring: one entry per emitted acknowledgment. */
 #define SERVER_NET_ACK_LOG		XTK_CMD_DEDUP_WINDOW
@@ -586,6 +587,24 @@ admit_one(ServerNetSession *s, const XtkCommand *c, int assign_tick,
 		if (c->op == XTK_OP_HEARTBEAT)
 			stats.heartbeats++;
 		return 1;
+	}
+
+	/*
+	 * Entity-life stamp (P3.11).  A gameplay command carries the controlled
+	 * entity-life generation it was produced under; a delayed edge from a
+	 * previous life must not fire after a respawn/reset even inside the
+	 * expiry window.  A zero stamp is unstamped (accept); a non-zero stamp
+	 * must match the session's current controlled life generation.
+	 */
+	if (c->life_generation != 0) {
+		uint32_t cur = server_events_generation(XTK_ENTITY_VEHICLE,
+							(uint16_t) s->slot);
+
+		if (c->life_generation != cur) {
+			dedup_insert(s, c->command_id);
+			reject(s, c, assign_tick, XTK_ERR_STALE_LIFE);
+			return 0;
+		}
 	}
 
 	/* D3-E per-peer per-tick fairness quota.  A flooding peer never gets
