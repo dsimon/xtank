@@ -31,6 +31,26 @@ static int control_is_held(XtkControl ctl)
 	       ctl == XTK_CTL_FIRE_HOLD;
 }
 
+/*
+ * True for commands whose loss must be recovered by the reliable companion:
+ * one-shot fire/weapon edges and the one-shot releases of held controls.  A
+ * lost held refresh is harmless (the server holds the last value until the
+ * next refresh); a lost edge or release is not.
+ */
+static int command_needs_reliable(const XtkCommand *c)
+{
+	switch (c->op) {
+	case XTK_OP_FIRE:
+	case XTK_OP_WEAPON:
+		return 1;
+	case XTK_OP_DRIVE_REL:
+	case XTK_OP_FIRE_HOLD:
+		return c->a == 0.0;	/* the release, not the held refresh */
+	default:
+		return 0;
+	}
+}
+
 static uint32_t alloc_command_id(XtkInputController *ic)
 {
 	uint32_t id = ic->next_command_id++;
@@ -178,6 +198,33 @@ void input_control_event(XtkInputController *ic, XtkControl ctl, int down)
 	}
 }
 
+void input_set_life_generation(XtkInputController *ic, uint32_t generation)
+{
+	if (ic == NULL || generation == 0) {
+		/* 0 = not yet known; never clears or stamps the last known life. */
+		return;
+	}
+	if (generation == ic->life_generation) {
+		return;
+	}
+	/*
+	 * A new life: an edge latched or produced in the previous life must not
+	 * fire under the new one.  Drop the latched one-shot edges and the
+	 * redundancy history; the held state is re-derived each tick, so a
+	 * still-held control is simply restamped with the new generation.
+	 */
+	if (ic->life_generation != 0) {
+		memset(ic->edge, 0, sizeof(ic->edge));
+		ring_clear(ic);
+	}
+	ic->life_generation = generation;
+}
+
+uint32_t input_life_generation(const XtkInputController *ic)
+{
+	return (ic != NULL) ? ic->life_generation : 0;
+}
+
 void input_aim_world(XtkInputController *ic, double world_x, double world_y)
 {
 	if (ic->state != XTK_INPUT_RUNNING) {
@@ -242,6 +289,7 @@ static void add_command(XtkInputController *ic, XtkCommand *arr, int *n,
 	memset(c, 0, sizeof(*c));
 	c->command_id = alloc_command_id(ic);
 	c->tick_hint = (uint32_t)tick;
+	c->life_generation = ic->life_generation;
 	c->op = op;
 	c->flags = flags;
 	c->a = a;
@@ -315,21 +363,37 @@ static int build_tick(XtkInputController *ic, int32_t tick, XtkCommand *cur)
 	return n;
 }
 
-int input_emit(XtkInputController *ic, int32_t server_tick, uint32_t epoch,
-	       uint32_t session_id, XtkMessage *out)
+int input_emit_reliable(XtkInputController *ic, int32_t server_tick,
+			uint32_t epoch, uint32_t session_id,
+			XtkMessage *batch_out, XtkMessage *reliable_out,
+			int *have_reliable)
 {
 	XtkCommand cur[XTK_INPUT_MAX_BATCH];
 	int cur_n = 0;
-	int total = 0;
+	int total = 0, rel_total = 0;
 	int slot, i;
 
-	memset(out, 0, sizeof(*out));
-	out->env.message_type = XTK_MSG_INPUT_BATCH;
-	out->env.epoch = epoch;
-	out->env.session_id = session_id;
-	out->env.tick = server_tick;
-	out->body.input_batch.packet_sequence = ic->next_packet_sequence;
-	out->body.input_batch.last_observed_server_tick = (uint32_t)server_tick;
+	if (have_reliable != NULL) {
+		*have_reliable = 0;
+	}
+	memset(batch_out, 0, sizeof(*batch_out));
+	batch_out->env.message_type = XTK_MSG_INPUT_BATCH;
+	batch_out->env.epoch = epoch;
+	batch_out->env.session_id = session_id;
+	batch_out->env.tick = server_tick;
+	batch_out->body.input_batch.packet_sequence = ic->next_packet_sequence;
+	batch_out->body.input_batch.last_observed_server_tick =
+		(uint32_t)server_tick;
+
+	if (reliable_out != NULL) {
+		memset(reliable_out, 0, sizeof(*reliable_out));
+		reliable_out->env.message_type = XTK_MSG_RELIABLE_CMD;
+		reliable_out->env.epoch = epoch;
+		reliable_out->env.session_id = session_id;
+		reliable_out->env.tick = server_tick;
+		reliable_out->body.reliable_cmd.last_observed_server_tick =
+			(uint32_t)server_tick;
+	}
 
 	/* Never emit on tick 0, and never emit gameplay outside Running. */
 	if (server_tick <= 0 || ic->state != XTK_INPUT_RUNNING) {
@@ -349,25 +413,49 @@ int input_emit(XtkInputController *ic, int32_t server_tick, uint32_t epoch,
 		}
 	}
 
-	/* Oldest valid tick first, newest last: admitted order is preserved. */
+	/*
+	 * Oldest valid tick first, newest last: admitted order is preserved.  The
+	 * same ring walk fills the reliable companion with the one-shot edges and
+	 * held releases (identical command ids), so a lost unreliable datagram is
+	 * recovered on channel 0 and the server's shared dedup applies once.
+	 */
 	for (i = ic->ring_filled - 1; i >= 0; --i) {
 		int s = (ic->ring_head - i + (int)XTK_INPUT_RING) %
 			(int)XTK_INPUT_RING;
 		int k, c = ic->ring_count[s];
 		for (k = 0; k < c; ++k) {
-			if (total >= (int)XTK_INPUT_MAX_BATCH) {
-				break;
+			const XtkCommand *cmd = &ic->ring[s][k];
+
+			if (total < (int)XTK_INPUT_MAX_BATCH) {
+				batch_out->body.input_batch.command[total++] =
+					*cmd;
 			}
-			out->body.input_batch.command[total++] = ic->ring[s][k];
-		}
-		if (total >= (int)XTK_INPUT_MAX_BATCH) {
-			break;
+			if (reliable_out != NULL &&
+			    rel_total < (int)XTK_INPUT_MAX_BATCH &&
+			    command_needs_reliable(cmd)) {
+				reliable_out->body.reliable_cmd
+					.command[rel_total++] = *cmd;
+			}
 		}
 	}
 
-	out->body.input_batch.command_count = (uint16_t)total;
+	batch_out->body.input_batch.command_count = (uint16_t)total;
+	if (reliable_out != NULL) {
+		reliable_out->body.reliable_cmd.command_count =
+			(uint16_t)rel_total;
+		if (have_reliable != NULL && rel_total > 0) {
+			*have_reliable = 1;
+		}
+	}
 	if (total > 0) {
 		ic->next_packet_sequence++;
 	}
 	return total;
+}
+
+int input_emit(XtkInputController *ic, int32_t server_tick, uint32_t epoch,
+	       uint32_t session_id, XtkMessage *out)
+{
+	return input_emit_reliable(ic, server_tick, epoch, session_id, out,
+				   NULL, NULL);
 }
