@@ -649,8 +649,16 @@ section_timeout(void)
 	      server_session_step(A, t0 + 2000) == GAME_RUNNING);
 	check("2001 ms removes the silent peer",
 	      server_session_step(A, t0 + 2001) == GAME_OVER);
-	check("after timeout the coordinator is back in the lobby",
-	      server_session_state(A) == SERVER_SESSION_LOBBY);
+	/*
+	 * P3.7 supersedes the P3.6 shared-teardown behaviour this assertion
+	 * originally pinned: a timeout now removes the peer through the shared
+	 * departure path.  With both peers silent the world ends and both peer
+	 * records are released back to the listening lobby.  The 1,999/2,000/
+	 * 2,001 ms boundary coverage above is unchanged.
+	 */
+	check("after timeout the peers are removed and the world is emptied",
+	      server_session_count() == 0 && num_veh_alive == 0 &&
+	      server_departed_count() == 0);
 	teardown_session();
 
 	/* Scenario 2: invalid / replayed / foreign traffic does not extend. */
