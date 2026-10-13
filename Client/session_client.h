@@ -111,6 +111,14 @@ int session_client_send_quit(XtkSessionClient *c);
 /* Send one INPUT_BATCH (channel 2) produced by Client/input.c. */
 int session_client_send_input(XtkSessionClient *c, const XtkMessage *batch);
 
+/*
+ * Send the reliable companion (RELIABLE_CMD, channel 0) for one-shot edges and
+ * held releases produced by Client/input.c.  It shares command ids with the
+ * unreliable INPUT_BATCH, so the server dedup applies each at most once.
+ */
+int session_client_send_input_reliable(XtkSessionClient *c,
+				       const XtkMessage *reliable);
+
 /* ---- read-only accessors -------------------------------------------- */
 
 XtkSessionState session_client_state(const XtkSessionClient *c);
