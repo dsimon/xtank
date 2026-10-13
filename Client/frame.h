@@ -51,6 +51,7 @@ typedef struct {
 	int      snapshots;		/* VIEW_SNAPSHOT messages accepted     */
 	int      cmd_acks;		/* CMD_ACK messages received           */
 	int      emitted_batches;	/* input batches sent this epoch       */
+	int      reliable_batches;	/* reliable companions sent this epoch */
 	int32_t  first_emit_tick;	/* first tick an input batch was sent  */
 	int32_t  last_emit_tick;
 	int      map_cells;		/* known MapCell records drawn         */
