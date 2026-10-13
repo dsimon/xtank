@@ -200,6 +200,7 @@ static void enc_welcome(W *w, const XtkWelcome *m)
     w_u8(w, m->role);
     w_u8(w, m->tick_hz);
     w_u8(w, m->max_players);
+    w_u8(w, m->human_capacity);
     w_u8(w, 0);
 }
 
@@ -231,6 +232,9 @@ static void enc_config_select(W *w, const XtkConfigSelect *m)
 {
     w_u16(w, m->maze_id);
     w_u16(w, m->vehicle_id);
+    w_u8(w, m->drone_count);
+    w_u8(w, 0);
+    w_u16(w, 0);
     w_u32(w, 0);
 }
 
@@ -238,16 +242,72 @@ static void enc_config_status(W *w, const XtkConfigStatus *m)
 {
     w_u16(w, m->maze_id);
     w_u16(w, m->vehicle_id);
+    w_u8(w, m->drone_count);
+    w_u8(w, 0);
     w_u16(w, m->status);
     w_u16(w, m->error_code);
+    w_u16(w, 0);
+    w_u32(w, m->config_revision);
+}
+
+static void enc_ready(W *w, const XtkReady *m)
+{
+    w_u8(w, m->ready);
+    w_u8(w, 0);
+    w_u16(w, 0);
+    w_u32(w, m->config_revision);
 }
 
 static void enc_start(W *w, const XtkStart *m)
 {
     w_u32(w, m->start_tick);
     w_u16(w, m->maze_id);
-    w_u8(w, m->vehicle_id);
+    w_u16(w, m->vehicle_id);
+    w_u8(w, m->drone_count);
     w_u8(w, 0);
+    w_u16(w, 0);
+    w_u32(w, m->config_revision);
+}
+
+static void enc_start_request(W *w, const XtkStartRequest *m)
+{
+    w_u32(w, m->expected_config_revision);
+    w_u32(w, 0);
+}
+
+/* LOBBY_STATE carries its roster inline; this helper is the single source of
+ * the entry layout. */
+static void enc_roster_entry(W *w, const XtkRosterEntry *e)
+{
+    w_u32(w, e->connection_id);
+    w_u32(w, e->controller_id);
+    w_u8(w, e->slot);
+    w_u8(w, e->ready);
+    w_u8(w, e->flags);
+    w_u8(w, e->departure_reason);
+    w_str(w, e->name, XTK_MAX_NAME_BYTES);
+}
+
+static void enc_lobby_state(W *w, const XtkLobbyStatus *m)
+{
+    uint8_t i;
+    if (m->human_count > XTK_LOBBY_ROSTER_MAX) {
+        w->err = XTK_ERR_BAD_LENGTH;
+        return;
+    }
+    w_u32(w, m->config_revision);
+    w_u8(w, m->session_state);
+    w_u8(w, m->drone_count);
+    w_u16(w, m->maze_id);
+    w_u16(w, m->vehicle_id);
+    w_u8(w, m->self_index);
+    w_u8(w, m->admin_index);
+    w_u8(w, m->human_count);
+    w_u8(w, 0);
+    w_u16(w, 0);
+    for (i = 0; i < m->human_count; ++i) {
+        enc_roster_entry(w, &m->entry[i]);
+    }
 }
 
 static void enc_epoch_begin(W *w, const XtkEpochBegin *m)
@@ -270,8 +330,9 @@ static void enc_results(W *w, const XtkResults *m)
     w_u8(w, 0);
     for (i = 0; i < m->vehicle_count; ++i) {
         w_u8(w, m->entry[i].slot);
-        w_u8(w, m->entry[i].generation);
+        w_u8(w, m->entry[i].flags);
         w_u16(w, 0);
+        w_u32(w, m->entry[i].generation);
         w_u32(w, m->entry[i].score);
         w_str(w, m->entry[i].name, XTK_MAX_NAME_BYTES);
     }
@@ -286,6 +347,7 @@ static void enc_reset(W *w, const XtkReset *m)
 static void enc_event(W *w, const XtkEvent *m)
 {
     w_u32(w, m->event_sequence);
+    w_u32(w, m->capture_tick);
     w_u8(w, m->event_type);
     w_u8(w, m->entity_kind);
     w_u16(w, m->entity_id);
@@ -328,6 +390,7 @@ static void enc_commands(W *w, const XtkCommand *c, uint16_t n)
     for (i = 0; i < n; ++i) {
         w_u32(w, c[i].command_id);
         w_u32(w, c[i].tick_hint);
+        w_u32(w, c[i].life_generation);
         w_u8(w, c[i].op);
         w_u8(w, c[i].flags);
         w_u16(w, 0);
@@ -365,7 +428,7 @@ static void enc_self_state(W *w, const XtkSelfState *m)
 {
     int i;
     w_u8(w, m->slot);
-    w_u8(w, m->generation);
+    w_u8(w, 0);
     w_u16(w, m->lifecycle_flags);
     for (i = 0; i < (int)XTK_ARMOR_SIDES; ++i) w_u16(w, m->armor[i]);
     w_u16(w, m->fuel);
@@ -375,6 +438,7 @@ static void enc_self_state(W *w, const XtkSelfState *m)
     w_u8(w, m->weapon_enabled_bitmap);
     w_u8(w, m->weapon_count);
     for (i = 0; i < (int)XTK_MAX_WEAPONS; ++i) w_u16(w, m->reload[i]);
+    w_u32(w, m->generation);
     w_u8(w, 0);
     w_u8(w, 0);
 }
@@ -396,7 +460,8 @@ static void enc_view_snapshot(W *w, const XtkViewSnapshot *m)
     w_u32(w, m->server_tick);
     w_u16(w, m->flags);
     w_u8(w, m->own_slot);
-    w_u8(w, m->own_generation);
+    w_u8(w, 0);
+    w_u32(w, m->own_generation);
     w_u16(w, m->vehicle_count);
     w_u16(w, m->bullet_count);
     w_u16(w, m->explosion_count);
@@ -411,7 +476,7 @@ static void enc_view_snapshot(W *w, const XtkViewSnapshot *m)
     for (i = 0; i < m->vehicle_count; ++i) {
         const XtkVehicleView *v = &m->vehicle[i];
         w_u8(w, v->slot);
-        w_u8(w, v->generation);
+        w_u8(w, 0);
         w_u8(w, v->kind);
         w_u8(w, v->flags);
         w_f64(w, v->x);
@@ -420,6 +485,7 @@ static void enc_view_snapshot(W *w, const XtkViewSnapshot *m)
         w_f64(w, v->turret_angle);
         w_u16(w, v->body_picture);
         w_u16(w, v->turret_picture);
+        w_u32(w, v->generation);
         w_bytes(w, (const uint8_t[4]){0, 0, 0, 0}, 4);
     }
     for (i = 0; i < m->bullet_count; ++i) {
@@ -430,9 +496,10 @@ static void enc_view_snapshot(W *w, const XtkViewSnapshot *m)
         w_f64(w, b->y);
         w_f64(w, b->heading);
         w_u8(w, b->owner_slot);
-        w_u8(w, b->owner_generation);
         w_u8(w, b->kind);
-        w_u8(w, 0);
+        w_u16(w, 0);
+        w_u32(w, b->generation);
+        w_u32(w, b->owner_generation);
     }
     for (i = 0; i < m->explosion_count; ++i) {
         const XtkExplosionView *e = &m->explosion[i];
@@ -441,6 +508,7 @@ static void enc_view_snapshot(W *w, const XtkViewSnapshot *m)
         w_u8(w, e->flags);
         w_f64(w, e->x);
         w_f64(w, e->y);
+        w_u32(w, e->generation);
         w_bytes(w, (const uint8_t[4]){0, 0, 0, 0}, 4);
     }
     for (i = 0; i < m->map_cell_count; ++i) {
@@ -453,10 +521,13 @@ static void enc_view_snapshot(W *w, const XtkViewSnapshot *m)
     for (i = 0; i < m->landmark_count; ++i) {
         const XtkLandmarkView *l = &m->landmark[i];
         w_u8(w, l->kind);
-        w_u8(w, l->id);
-        w_u16(w, 0);
+        w_u8(w, l->grid_x);
+        w_u8(w, l->grid_y);
+        w_u8(w, 0);
         w_f64(w, l->x);
         w_f64(w, l->y);
+        w_u16(w, l->id);
+        w_u16(w, 0);
         w_bytes(w, (const uint8_t[4]){0, 0, 0, 0}, 4);
     }
     for (i = 0; i < m->radar_blip_count; ++i) {
@@ -514,10 +585,14 @@ int xtk_encode(uint8_t *out, size_t cap, const XtkMessage *msg, size_t *out_len)
                              enc_config_select(&w, &msg->body.config_select); break;
     case XTK_MSG_CONFIG_STATUS:
                              enc_config_status(&w, &msg->body.config_status); break;
-    case XTK_MSG_READY:      break;                 /* zero-length payload */
+    case XTK_MSG_READY:      enc_ready(&w, &msg->body.ready); break;
     case XTK_MSG_START:      enc_start(&w, &msg->body.start); break;
+    case XTK_MSG_START_REQUEST:
+                             enc_start_request(&w, &msg->body.start_request); break;
     case XTK_MSG_EPOCH_BEGIN:
                              enc_epoch_begin(&w, &msg->body.epoch_begin); break;
+    case XTK_MSG_LOBBY_STATE:
+                             enc_lobby_state(&w, &msg->body.lobby_state); break;
     case XTK_MSG_RESULTS:    enc_results(&w, &msg->body.results); break;
     case XTK_MSG_RESET:      enc_reset(&w, &msg->body.reset); break;
     case XTK_MSG_QUIT:       break;                 /* zero-length payload */
@@ -530,6 +605,7 @@ int xtk_encode(uint8_t *out, size_t cap, const XtkMessage *msg, size_t *out_len)
     case XTK_MSG_INPUT_BATCH:
                              enc_input_batch(&w, &msg->body.input_batch); break;
     case XTK_MSG_VIEW_SNAPSHOT:
+    case XTK_MSG_VIEW_KEYFRAME:
                              enc_view_snapshot(&w, &msg->body.view_snapshot); break;
     default:
         return XTK_ERR_BAD_TYPE;
