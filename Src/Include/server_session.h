@@ -145,6 +145,10 @@ uint32_t server_session_config_revision(const ServerSession *s);
 int server_session_config_valid(const ServerSession *s);
 int server_session_bound_slot(const ServerSession *s);
 uint32_t server_session_snapshot_seq(const ServerSession *s);
+
+/* P3.9: 1 while this peer retains one newest unsent snapshot (always 0 or 1). */
+int server_session_pending_snapshot(const ServerSession *s);
+
 int server_session_events_sent(const ServerSession *s);
 
 /* 1 when every admitted (post-handshake) peer is ready against the revision. */
