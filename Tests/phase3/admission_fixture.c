@@ -43,6 +43,7 @@
 #include "vehicle.h"
 #include "server.h"
 #include "server_net.h"
+#include "server_events.h"
 #include "server_session.h"
 #include "intent.h"
 #include "proto.h"
@@ -698,6 +699,61 @@ section_timeout(void)
 	teardown_session();
 }
 
+/* ---- P3.11 entity-life stamp ------------------------------------------ */
+
+static void
+section_life_generation(void)
+{
+	ServerNetSession *A, *B;
+	uint32_t epoch, T, cur, tick;
+	uint8_t status, reason;
+	XtkCommand c;
+	XtkMessage m;
+	int slot;
+
+	fprintf(stderr, "== entity-life generation stamp (P3.11)\n");
+
+	if (live_two_human(&A, &B, &epoch) != 0) {
+		check("two-human match for the life stamp", 0);
+		teardown_session();
+		return;
+	}
+	check("two-human match for the life stamp", 1);
+
+	intent_reset();
+	slot = server_net_session_slot(A);
+	cur = server_events_generation(XTK_ENTITY_VEHICLE, (uint16_t) slot);
+	check("controlled vehicle has a live generation", cur >= 1);
+	T = (uint32_t) (server_frame() + 1);
+
+	/* A command stamped with the current life is admitted. */
+	cmd_init(&c, 70001, T, XTK_OP_DRIVE_REL, XTK_FLAG_HELD, 1.0, 0.0);
+	c.life_generation = cur;
+	make_batch(&m, epoch, 700001, &c, 1);
+	check("current-life command admitted",
+	      server_net_admit_message_on(A, &m, XTK_CH_INPUT, (int) T) == 1);
+
+	/* A delayed edge from a previous life is rejected STALE_LIFE even
+	 * inside the expiry window. */
+	cmd_init(&c, 70002, T, XTK_OP_FIRE, XTK_FLAG_EDGE, 0.0, 0.0);
+	c.life_generation = cur + 7;
+	make_batch(&m, epoch, 700002, &c, 1);
+	check("stale-life edge rejected",
+	      server_net_admit_message_on(A, &m, XTK_CH_INPUT, (int) T) == 0);
+	status = ack_status(A, 70002, &tick, &reason);
+	check("stale-life edge ack reason is STALE_LIFE",
+	      status == XTK_ACK_REJECTED && reason == XTK_ERR_STALE_LIFE);
+
+	/* An unstamped (zero) command is legacy/neutral and still admitted. */
+	cmd_init(&c, 70003, T, XTK_OP_DRIVE_REL, XTK_FLAG_HELD, -1.0, 0.0);
+	c.life_generation = 0;
+	make_batch(&m, epoch, 700003, &c, 1);
+	check("unstamped command admitted",
+	      server_net_admit_message_on(A, &m, XTK_CH_INPUT, (int) T) == 1);
+
+	teardown_session();
+}
+
 /* ----------------------------------------------------------------------- */
 
 int
@@ -711,6 +767,7 @@ main(int argc, char *argv[])
 	section_fairness();
 	section_identity_and_validation();
 	section_timeout();
+	section_life_generation();
 
 	check("no Terminal was ever allocated", n_make_terminal == 0);
 	check("no set_terminal call", n_set_terminal == 0);
@@ -724,7 +781,7 @@ main(int argc, char *argv[])
 	}
 	printf("ADMISSION FIXTURE PASS (checks=%d; per-peer quotas within the "
 	       "64/128 bounds, cross-peer fairness, both-departure reserve, "
-	       "dedup/channel/epoch/ownership, 2000 ms timeout boundary)\n",
-	       checks);
+	       "dedup/channel/epoch/ownership/entity-life stamp, 2000 ms "
+	       "timeout boundary)\n", checks);
 	return 0;
 }
