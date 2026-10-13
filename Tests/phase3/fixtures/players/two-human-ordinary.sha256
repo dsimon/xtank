@@ -1,0 +1,5 @@
+# P3.5 bot-free two-human ordinary reference, reproduced through the shipping
+# P3.4 coordinator.  The same authoritative character-state hash is frozen by
+# P3.2 (Tests/phase3/fixtures/two-human-ordinary.sha256); two humans,
+# combat1/Vanguard, seed 114336, deterministic 200-tick script, no drones.
+hash=5625b7035aae2e82
