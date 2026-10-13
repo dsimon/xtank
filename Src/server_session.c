@@ -1,15 +1,26 @@
 /*
- * server_session.c -- solo lobby and network-server session (P2.8).
+ * server_session.c -- shared lobby and one-world match coordinator (P3.4).
  *
  * See Src/Include/server_session.h for the contract.  This module is the glue
  * that makes the P2.6 event/result exporter and the P2.7 admission layer part
- * of the shipped server.  It owns one peer (D2-F), the lobby handshake, the
- * allowlisted content selection, start/reset administration, the two-second
- * solo timeout abort and the per-tick snapshot/event delivery.
+ * of the shipped two-human server.
+ *
+ * P3.4 splits the Phase 2 singleton into:
+ *
+ *   - a shared coordinator (one world): state, epoch, config revision, maze /
+ *     Vanguard / drone selection, the administrator index and the single match
+ *     step/results/reset transaction; and
+ *   - two bounded peer records: connection/controller identity, name,
+ *     readiness, transport/admission handle, bound slot/generation, reply log
+ *     and delivery cursors.
+ *
+ * One start transaction, one world init, one server_step() per tick and one
+ * results finalization/reset run regardless of peer count.  The listen service
+ * stays alive through empty-session lobby cycles.
  *
  * Everything here runs on the simulation thread.  With no transport attached
  * (transport == NULL) the state machine is driven directly, which is what the
- * P2.8 acceptance fixture does.
+ * P3.4 acceptance fixture does.
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -60,20 +71,23 @@ extern Vehicle *dead_vehicles[];
 
 #define SERVER_SESSION_STEP_BUDGET	XTK_MAX_SERVICE_WORK_PER_TICK
 
+/*
+ * Per-peer record.  Everything that is not shared world state lives here; the
+ * shared coordinator below owns the one world, epoch, config and administrator.
+ */
 struct ServerSession {
 	int used;
-	ServerSessionState state;
+	int index;
+	int in_handshake;	/* 1 until a valid HELLO is accepted */
+	int disconnected;	/* QUIT or fatal peer error; service reclaims */
 
-	uint32_t session_id;
-	uint32_t epoch;
-	int is_admin;
+	uint32_t session_id;		/* stable connection identity */
+	uint32_t controller_id;		/* stable controller identity */
 
 	char name[XTK_MAX_NAME_BYTES + 1];
 
-	uint16_t maze_id;
-	uint16_t vehicle_id;
-	int config_valid;
-	int ready;
+	int ready;			/* readiness against the live revision */
+	int binding;			/* ServerHumanBinding index, -1 none */
 
 	Transport *t;
 	TransportPeer *peer;
@@ -83,7 +97,6 @@ struct ServerSession {
 	unsigned int generation;
 
 	uint64_t last_rx_ms;
-	int epoch_live;
 
 	uint32_t snapshot_seq;
 	int events_sent;
@@ -94,10 +107,28 @@ struct ServerSession {
 	uint8_t reply_buf[SERVER_SESSION_REPLY_MAX][SERVER_SESSION_REPLY_BYTES];
 };
 
-static ServerSession the_session;
+/* Shared coordinator: exactly one world/config/epoch/administrator. */
+static struct {
+	ServerSessionState state;
+	uint32_t epoch;
+	int epoch_live;
+
+	uint16_t maze_id;
+	uint16_t vehicle_id;
+	uint8_t drone_count;
+	int config_valid;
+	uint32_t config_revision;
+
+	int admin_index;
+
+	uint32_t next_session_id;
+	uint32_t next_controller_id;
+} lobby;
+
+static ServerSession peers[SERVER_SESSION_MAX_PEERS];
 static int n_sessions;
+static int session_capacity = SERVER_SESSION_SOLO_PEERS;
 static Transport *session_host;
-static uint32_t next_session_id = 1;
 
 static uint8_t txbuf[XTK_MAX_MESSAGE_BYTES];
 
@@ -110,21 +141,44 @@ now_ms(void)
 	return (uint64_t) ts.tv_sec * 1000ULL + (uint64_t) ts.tv_nsec / 1000000ULL;
 }
 
-/* Find the session owning `peer` (or the first live session). */
+static int
+peer_active(const ServerSession *s)
+{
+	return s != (const ServerSession *) NULL && s->used &&
+	       !s->in_handshake && !s->disconnected;
+}
+
+/* Find the peer record owning `peer` (or the first live peer). */
 static ServerSession *
 session_for_peer(TransportPeer *peer)
 {
-	if (the_session.used && (peer == NULL || the_session.peer == peer))
-		return &the_session;
+	int i;
+
+	for (i = 0; i < SERVER_SESSION_MAX_PEERS; i++) {
+		if (!peers[i].used)
+			continue;
+		if (peer == NULL || peers[i].peer == peer)
+			return &peers[i];
+	}
 	return (ServerSession *) NULL;
 }
+
+/* ------------------------------------------------------------------ */
+/* Process lifecycle                                                   */
+/* ------------------------------------------------------------------ */
 
 void
 server_session_init(void)
 {
-	(void) memset(&the_session, 0, sizeof(the_session));
+	(void) memset(peers, 0, sizeof(peers));
 	n_sessions = 0;
 	session_host = (Transport *) NULL;
+
+	(void) memset(&lobby, 0, sizeof(lobby));
+	lobby.state = SERVER_SESSION_LOBBY;
+	lobby.admin_index = -1;
+	lobby.next_session_id = 1;
+	lobby.next_controller_id = 1;
 	server_net_init();
 }
 
@@ -141,10 +195,40 @@ server_session_count(void)
 	return n_sessions;
 }
 
+int
+server_session_capacity(void)
+{
+	return session_capacity;
+}
+
+void
+server_session_set_capacity(int capacity)
+{
+	if (capacity < SERVER_SESSION_SOLO_PEERS)
+		capacity = SERVER_SESSION_SOLO_PEERS;
+	if (capacity > SERVER_SESSION_MAX_PEERS)
+		capacity = SERVER_SESSION_MAX_PEERS;
+	session_capacity = capacity;
+}
+
 ServerSession *
 server_session_current(void)
 {
-	return the_session.used ? &the_session : (ServerSession *) NULL;
+	int i;
+
+	for (i = 0; i < SERVER_SESSION_MAX_PEERS; i++) {
+		if (peers[i].used)
+			return &peers[i];
+	}
+	return (ServerSession *) NULL;
+}
+
+ServerSession *
+server_session_peer_at(int index)
+{
+	if (index < 0 || index >= SERVER_SESSION_MAX_PEERS || !peers[index].used)
+		return (ServerSession *) NULL;
+	return &peers[index];
 }
 
 TransportPeer *
@@ -160,8 +244,13 @@ server_session_peer(const ServerSession *s)
 ServerSessionState
 server_session_state(const ServerSession *s)
 {
-	return (s != (const ServerSession *) NULL) ? s->state
-						   : SERVER_SESSION_DISCONNECTED;
+	if (s == (const ServerSession *) NULL || !s->used)
+		return SERVER_SESSION_DISCONNECTED;
+	if (s->disconnected)
+		return SERVER_SESSION_DISCONNECTED;
+	if (s->in_handshake)
+		return SERVER_SESSION_HANDSHAKE;
+	return lobby.state;
 }
 
 uint32_t
@@ -171,15 +260,29 @@ server_session_id(const ServerSession *s)
 }
 
 uint32_t
+server_session_controller_id(const ServerSession *s)
+{
+	return (s != (const ServerSession *) NULL) ? s->controller_id : 0;
+}
+
+int
+server_session_index(const ServerSession *s)
+{
+	return (s != (const ServerSession *) NULL) ? s->index : -1;
+}
+
+uint32_t
 server_session_epoch(const ServerSession *s)
 {
-	return (s != (const ServerSession *) NULL) ? s->epoch : 0;
+	(void) s;
+	return lobby.epoch;
 }
 
 int
 server_session_is_admin(const ServerSession *s)
 {
-	return (s != (const ServerSession *) NULL) && s->is_admin;
+	return s != (const ServerSession *) NULL && s->used &&
+	       !s->disconnected && lobby.admin_index == s->index;
 }
 
 int
@@ -191,19 +294,36 @@ server_session_ready(const ServerSession *s)
 uint16_t
 server_session_maze_id(const ServerSession *s)
 {
-	return (s != (const ServerSession *) NULL) ? s->maze_id : 0;
+	(void) s;
+	return lobby.maze_id;
 }
 
 uint16_t
 server_session_vehicle_id(const ServerSession *s)
 {
-	return (s != (const ServerSession *) NULL) ? s->vehicle_id : 0;
+	(void) s;
+	return lobby.vehicle_id;
+}
+
+int
+server_session_drone_count(const ServerSession *s)
+{
+	(void) s;
+	return lobby.drone_count;
+}
+
+uint32_t
+server_session_config_revision(const ServerSession *s)
+{
+	(void) s;
+	return lobby.config_revision;
 }
 
 int
 server_session_config_valid(const ServerSession *s)
 {
-	return (s != (const ServerSession *) NULL) && s->config_valid;
+	(void) s;
+	return lobby.config_valid;
 }
 
 int
@@ -224,86 +344,35 @@ server_session_events_sent(const ServerSession *s)
 	return (s != (const ServerSession *) NULL) ? s->events_sent : 0;
 }
 
+int
+server_session_all_ready(const ServerSession *s)
+{
+	int i, admitted = 0;
+
+	(void) s;
+	for (i = 0; i < SERVER_SESSION_MAX_PEERS; i++) {
+		if (!peer_active(&peers[i]))
+			continue;
+		admitted++;
+		if (!peers[i].ready)
+			return 0;
+	}
+	return admitted > 0;
+}
+
 void
 server_session_set_admin(ServerSession *s, int admin)
 {
-	if (s != (ServerSession *) NULL)
-		s->is_admin = admin ? 1 : 0;
-}
-
-/* ------------------------------------------------------------------ */
-/* Session lifecycle                                                   */
-/* ------------------------------------------------------------------ */
-
-ServerSession *
-server_session_accept(TransportPeer *peer)
-{
-	if (the_session.used || n_sessions >= SERVER_SESSION_MAX_PEERS)
-		return (ServerSession *) NULL;
-
-	(void) memset(&the_session, 0, sizeof(the_session));
-	the_session.used = 1;
-	the_session.state = SERVER_SESSION_HANDSHAKE;
-	the_session.session_id = next_session_id++;
-	the_session.epoch = 0;
-	the_session.is_admin = 1;	/* first (and only) peer administers */
-	the_session.t = session_host;
-	the_session.peer = peer;
-	the_session.bound_slot = -1;
-	n_sessions = 1;
-	return &the_session;
-}
-
-void
-server_session_destroy(ServerSession *s)
-{
 	if (s == (ServerSession *) NULL || !s->used)
 		return;
-	if (s->net != (ServerNetSession *) NULL) {
-		server_net_session_destroy(s->net);
-		s->net = (ServerNetSession *) NULL;
-	} else if (s->t != (Transport *) NULL &&
-		   s->peer != (TransportPeer *) NULL) {
-		transport_disconnect(s->t, s->peer);
-	}
-	if (s->bound_slot >= 0)
-		server_players_unbind_slot(s->bound_slot);
-	s->used = 0;
-	n_sessions = 0;
-}
-
-void
-server_session_reject_peer(Transport *t, TransportPeer *peer,
-			   uint16_t error_code, const char *text)
-{
-	XtkMessage m;
-	size_t len;
-	int e;
-
-	if (t == (Transport *) NULL || peer == (TransportPeer *) NULL)
-		return;
-	(void) memset(&m, 0, sizeof(m));
-	m.env.message_type = XTK_MSG_REJECT;
-	m.env.session_id = 0;
-	m.body.reject.error_code = error_code;
-	m.body.reject.detail_code = 0;
-	if (text != NULL) {
-		(void) strncpy(m.body.reject.text, text,
-			       XTK_MAX_ERROR_TEXT_BYTES);
-		m.body.reject.text[XTK_MAX_ERROR_TEXT_BYTES] = '\0';
-	}
-	e = xtk_encode(txbuf, sizeof(txbuf), &m, &len);
-	if (e == XTK_ERR_NONE)
-		(void) transport_send(t, peer, XTK_CH_CONTROL, txbuf, len);
-	transport_disconnect(t, peer);
+	lobby.admin_index = admin ? s->index : -1;
 }
 
 /* ------------------------------------------------------------------ */
 /* Outbound messages                                                   */
 /* ------------------------------------------------------------------ */
 
-/* Encode, send (when attached) and log a message in the reply ring.  Returns
- * the encoded length, or 0 on an encode failure. */
+/* Encode, send (when attached) and log a message in the peer reply ring. */
 static size_t
 session_emit(ServerSession *s, const XtkMessage *m)
 {
@@ -355,7 +424,7 @@ session_envelope(ServerSession *s, XtkMessage *m, uint8_t type, int32_t tick)
 	(void) memset(m, 0, sizeof(*m));
 	m->env.message_type = type;
 	m->env.session_id = s->session_id;
-	m->env.epoch = s->epoch_live ? s->epoch : 0;
+	m->env.epoch = lobby.epoch_live ? lobby.epoch : 0;
 	m->env.tick = tick;
 }
 
@@ -366,9 +435,10 @@ emit_welcome(ServerSession *s, uint32_t server_nonce)
 
 	session_envelope(s, &m, XTK_MSG_WELCOME, 0);
 	m.body.welcome.server_nonce = server_nonce;
-	m.body.welcome.role = 1;		/* player */
+	m.body.welcome.role = 1;		/* player; never administrator */
 	m.body.welcome.tick_hz = (uint8_t) XTK_SERVER_TICK_HZ;
 	m.body.welcome.max_players = (uint8_t) XTK_MAX_PLAYERS;
+	m.body.welcome.human_capacity = (uint8_t) session_capacity;
 	(void) session_emit(s, &m);
 }
 
@@ -429,46 +499,132 @@ emit_protocol_error(ServerSession *s, uint16_t code, uint16_t detail,
 	(void) session_emit(s, &m);
 }
 
+static uint8_t
+wire_session_state(void)
+{
+	switch (lobby.state) {
+	  case SERVER_SESSION_RUNNING: return (uint8_t) XTK_SESSION_RUNNING;
+	  case SERVER_SESSION_RESULTS: return (uint8_t) XTK_SESSION_RESULTS;
+	  default:                     return (uint8_t) XTK_SESSION_LOBBY;
+	}
+}
+
+/* One LOBBY_STATE for a specific recipient (self_index differs per peer). */
+static void
+emit_lobby_state(ServerSession *to)
+{
+	XtkMessage m;
+	int i, idx = 0;
+
+	session_envelope(to, &m, XTK_MSG_LOBBY_STATE, frame);
+	m.body.lobby_state.config_revision = lobby.config_revision;
+	m.body.lobby_state.session_state = wire_session_state();
+	m.body.lobby_state.drone_count = lobby.drone_count;
+	m.body.lobby_state.maze_id = lobby.maze_id;
+	m.body.lobby_state.vehicle_id = lobby.vehicle_id;
+	m.body.lobby_state.self_index = (uint8_t) to->index;
+	m.body.lobby_state.admin_index =
+		(lobby.admin_index >= 0) ? (uint8_t) lobby.admin_index : 0xFF;
+
+	for (i = 0; i < SERVER_SESSION_MAX_PEERS; i++) {
+		ServerSession *p = &peers[i];
+		XtkRosterEntry *e;
+
+		if (!peer_active(p))
+			continue;
+		e = &m.body.lobby_state.entry[idx++];
+		e->connection_id = p->session_id;
+		e->controller_id = p->controller_id;
+		e->slot = (p->bound_slot >= 0) ? (uint8_t) p->bound_slot : 0xFF;
+		e->ready = (uint8_t) p->ready;
+		e->flags = 0;
+		e->departure_reason = 0;
+		(void) memset(e->name, 0, sizeof(e->name));
+		(void) strncpy(e->name, p->name, XTK_MAX_NAME_BYTES);
+	}
+	m.body.lobby_state.human_count = (uint8_t) idx;
+	(void) session_emit(to, &m);
+}
+
+static void
+broadcast_lobby_state(void)
+{
+	int i;
+
+	for (i = 0; i < SERVER_SESSION_MAX_PEERS; i++) {
+		if (peer_active(&peers[i]))
+			emit_lobby_state(&peers[i]);
+	}
+}
+
 /* ------------------------------------------------------------------ */
 /* Message handling                                                    */
 /* ------------------------------------------------------------------ */
 
 static int
-handle_hello(ServerSession *s, const XtkMessage *msg, uint64_t now_ms)
+handle_hello(ServerSession *s, const XtkMessage *msg, uint64_t t)
 {
 	const XtkHello *h = &msg->body.hello;
+	char name[XTK_MAX_NAME_BYTES + 1];
+	int i;
 
-	if (s->state != SERVER_SESSION_HANDSHAKE) {
-		emit_protocol_error(s, XTK_ERR_BAD_STATE, s->state,
-				    XTK_MSG_HELLO);
+	if (!s->in_handshake) {
+		emit_protocol_error(s, XTK_ERR_BAD_STATE, s->index, XTK_MSG_HELLO);
 		return XTK_ERR_BAD_STATE;
 	}
 	if (h->proto_major != XTK_PROTOCOL_MAJOR ||
 	    h->proto_minor != XTK_PROTOCOL_MINOR) {
 		emit_reject(s, XTK_ERR_VERSION_MISMATCH,
 			    "unsupported protocol version");
-		s->state = SERVER_SESSION_DISCONNECTED;
+		s->disconnected = 1;
 		return XTK_ERR_VERSION_MISMATCH;
 	}
 	if (memcmp(h->content_set_digest, xtk_content_set_digest,
 		   XTK_SHA256_BYTES) != 0) {
-		/* Content mismatch fails before any catalog is sent; no download. */
 		emit_reject(s, XTK_ERR_CONTENT_MISMATCH,
 			    "content set does not match the server");
-		s->state = SERVER_SESSION_DISCONNECTED;
+		s->disconnected = 1;
 		return XTK_ERR_CONTENT_MISMATCH;
 	}
 
-	(void) memset(s->name, 0, sizeof(s->name));
-	(void) strncpy(s->name, h->name, XTK_MAX_NAME_BYTES);
-	s->name[XTK_MAX_NAME_BYTES] = '\0';
-	if (s->name[0] == '\0')
-		(void) strcpy(s->name, "player");
+	(void) memset(name, 0, sizeof(name));
+	(void) strncpy(name, h->name, XTK_MAX_NAME_BYTES);
+	name[XTK_MAX_NAME_BYTES] = '\0';
+	if (name[0] == '\0')
+		(void) strcpy(name, "player");
 
-	s->last_rx_ms = now_ms;
+	/* D3-E: duplicate names are rejected; connection identity is separate. */
+	for (i = 0; i < SERVER_SESSION_MAX_PEERS; i++) {
+		if (&peers[i] == s || !peer_active(&peers[i]))
+			continue;
+		if (strcmp(peers[i].name, name) == 0) {
+			emit_reject(s, XTK_ERR_DUPLICATE_NAME,
+				    "player name already in use");
+			s->disconnected = 1;
+			return XTK_ERR_DUPLICATE_NAME;
+		}
+	}
+
+	if (lobby.state != SERVER_SESSION_LOBBY) {
+		emit_reject(s, XTK_ERR_SESSION_FULL, "a match is in progress");
+		s->disconnected = 1;
+		return XTK_ERR_SESSION_FULL;
+	}
+
+	(void) strncpy(s->name, name, XTK_MAX_NAME_BYTES);
+	s->name[XTK_MAX_NAME_BYTES] = '\0';
+	s->last_rx_ms = t;
+	s->in_handshake = 0;
+
+	/* The first admitted (post-handshake) human administers; assigning here
+	 * rather than at accept means a half-open connection can never hold the
+	 * administrator role. */
+	if (lobby.admin_index < 0)
+		lobby.admin_index = s->index;
+
 	emit_welcome(s, h->client_nonce);
 	emit_catalog(s);
-	s->state = SERVER_SESSION_LOBBY;
+	broadcast_lobby_state();
 	return XTK_ERR_NONE;
 }
 
@@ -479,12 +635,23 @@ handle_config_select(ServerSession *s, const XtkMessage *msg)
 	XtkMessage out;
 	uint16_t maze = msg->body.config_select.maze_id;
 	uint16_t veh = msg->body.config_select.vehicle_id;
+	uint8_t drones = msg->body.config_select.drone_count;
+	int i;
 
-	if (s->state != SERVER_SESSION_LOBBY) {
-		emit_protocol_error(s, XTK_ERR_BAD_STATE, s->state,
+	if (lobby.state != SERVER_SESSION_LOBBY) {
+		emit_protocol_error(s, XTK_ERR_BAD_STATE, lobby.state,
 				    XTK_MSG_CONFIG_SELECT);
 		return XTK_ERR_BAD_STATE;
 	}
+	/* Server-authoritative administration: only the administrator configures. */
+	if (lobby.admin_index != s->index) {
+		emit_protocol_error(s, XTK_ERR_NOT_ADMIN, 0,
+				    XTK_MSG_CONFIG_SELECT);
+		return XTK_ERR_NOT_ADMIN;
+	}
+	if (drones > XTK_MAX_DRONES)
+		drones = XTK_MAX_DRONES;
+
 	mz = xtk_content_lookup(maze);
 	vh = xtk_content_lookup(veh);
 	if (mz == (const XtkContentEntry *) NULL ||
@@ -494,49 +661,149 @@ handle_config_select(ServerSession *s, const XtkMessage *msg)
 		session_envelope(s, &out, XTK_MSG_CONFIG_STATUS, 0);
 		out.body.config_status.maze_id = maze;
 		out.body.config_status.vehicle_id = veh;
+		out.body.config_status.drone_count = drones;
 		out.body.config_status.status = 1;
 		out.body.config_status.error_code = XTK_ERR_BAD_CONTENT_ID;
+		out.body.config_status.config_revision = lobby.config_revision;
 		(void) session_emit(s, &out);
-		s->config_valid = 0;
 		return XTK_ERR_NONE;
 	}
 
-	s->maze_id = maze;
-	s->vehicle_id = veh;
-	s->config_valid = 1;
-	s->ready = 0;
+	lobby.maze_id = maze;
+	lobby.vehicle_id = veh;
+	lobby.drone_count = drones;
+	lobby.config_valid = 1;
+	lobby.config_revision++;
+	/* D3-B: a config change wipes every peer's readiness. */
+	for (i = 0; i < SERVER_SESSION_MAX_PEERS; i++)
+		peers[i].ready = 0;
+
 	session_envelope(s, &out, XTK_MSG_CONFIG_STATUS, 0);
 	out.body.config_status.maze_id = maze;
 	out.body.config_status.vehicle_id = veh;
+	out.body.config_status.drone_count = drones;
 	out.body.config_status.status = 0;
 	out.body.config_status.error_code = XTK_ERR_NONE;
+	out.body.config_status.config_revision = lobby.config_revision;
 	(void) session_emit(s, &out);
+	broadcast_lobby_state();
 	return XTK_ERR_NONE;
 }
 
 static int
-handle_ready(ServerSession *s)
+handle_ready(ServerSession *s, const XtkMessage *msg)
 {
-	if (s->state != SERVER_SESSION_LOBBY) {
-		emit_protocol_error(s, XTK_ERR_BAD_STATE, s->state,
+	if (lobby.state != SERVER_SESSION_LOBBY) {
+		emit_protocol_error(s, XTK_ERR_BAD_STATE, lobby.state,
 				    XTK_MSG_READY);
 		return XTK_ERR_BAD_STATE;
 	}
-	if (!s->config_valid) {
+	if (!lobby.config_valid) {
 		emit_protocol_error(s, XTK_ERR_BAD_STATE, 0, XTK_MSG_READY);
 		return XTK_ERR_BAD_STATE;
 	}
-	s->ready = 1;
+	if (msg->body.ready.config_revision != lobby.config_revision) {
+		emit_protocol_error(s, XTK_ERR_STALE_CONFIG,
+				    (uint16_t) lobby.config_revision,
+				    XTK_MSG_READY);
+		return XTK_ERR_STALE_CONFIG;
+	}
+	s->ready = msg->body.ready.ready ? 1 : 0;
+	broadcast_lobby_state();
+	return XTK_ERR_NONE;
+}
+
+static int
+handle_start_request(ServerSession *s, const XtkMessage *msg, uint64_t t)
+{
+	if (lobby.state != SERVER_SESSION_LOBBY) {
+		emit_protocol_error(s, XTK_ERR_BAD_STATE, lobby.state,
+				    XTK_MSG_START_REQUEST);
+		return XTK_ERR_BAD_STATE;
+	}
+	if (lobby.admin_index != s->index) {
+		emit_protocol_error(s, XTK_ERR_NOT_ADMIN, 0,
+				    XTK_MSG_START_REQUEST);
+		return XTK_ERR_NOT_ADMIN;
+	}
+	if (msg->body.start_request.expected_config_revision !=
+	    lobby.config_revision) {
+		emit_protocol_error(s, XTK_ERR_STALE_CONFIG,
+				    (uint16_t) lobby.config_revision,
+				    XTK_MSG_START_REQUEST);
+		return XTK_ERR_STALE_CONFIG;
+	}
+	if (!server_session_all_ready(s)) {
+		emit_protocol_error(s, XTK_ERR_NOT_READY, 0,
+				    XTK_MSG_START_REQUEST);
+		return XTK_ERR_NOT_READY;
+	}
+	if (server_session_begin(s, (uint32_t) (frame + 1), t) !=
+	    SERVER_SESSION_OK) {
+		emit_protocol_error(s, XTK_ERR_BAD_STATE, lobby.state,
+				    XTK_MSG_START_REQUEST);
+		return XTK_ERR_BAD_STATE;
+	}
+	return XTK_ERR_NONE;
+}
+
+/* Release the current epoch's world and per-peer match ownership. */
+static void
+shared_clear_match(void)
+{
+	int i;
+
+	server_match_reset();
+	for (i = 0; i < SERVER_SESSION_MAX_PEERS; i++) {
+		ServerSession *p = &peers[i];
+
+		if (!p->used)
+			continue;
+		if (p->bound_slot >= 0)
+			server_players_unbind_slot(p->bound_slot);
+		p->bound_slot = -1;
+		p->generation = 0;
+		p->snapshot_seq = 0;
+		p->events_sent = 0;
+		p->ready = 0;
+	}
+	lobby.epoch_live = 0;
+	lobby.state = SERVER_SESSION_LOBBY;
+}
+
+static int
+handle_reset(ServerSession *s, const XtkMessage *msg, uint64_t t)
+{
+	if (lobby.state != SERVER_SESSION_RUNNING &&
+	    lobby.state != SERVER_SESSION_RESULTS) {
+		emit_protocol_error(s, XTK_ERR_BAD_STATE, lobby.state,
+				    XTK_MSG_RESET);
+		return XTK_ERR_BAD_STATE;
+	}
+	if (lobby.admin_index != s->index) {
+		emit_protocol_error(s, XTK_ERR_NOT_ADMIN, 0, XTK_MSG_RESET);
+		return XTK_ERR_NOT_ADMIN;
+	}
+	if (msg->body.reset.prior_epoch != lobby.epoch) {
+		emit_protocol_error(s, XTK_ERR_STALE_EPOCH,
+				    (uint16_t) lobby.epoch, XTK_MSG_RESET);
+		return XTK_ERR_STALE_EPOCH;
+	}
+	(void) t;
+	/* A reset from a live match is a labeled abort. */
+	if (lobby.state == SERVER_SESSION_RUNNING)
+		server_session_finish(s, GAME_OVER);
+	shared_clear_match();
+	broadcast_lobby_state();
 	return XTK_ERR_NONE;
 }
 
 static int
 handle_input(ServerSession *s, const XtkMessage *msg)
 {
-	if (s->state != SERVER_SESSION_RUNNING ||
+	if (lobby.state != SERVER_SESSION_RUNNING ||
 	    s->net == (ServerNetSession *) NULL) {
-		/* No controls outside Running. */
-		emit_protocol_error(s, XTK_ERR_BAD_STATE, s->state,
+		emit_protocol_error(s, XTK_ERR_BAD_STATE, lobby.state,
 				    msg->env.message_type);
 		return XTK_ERR_BAD_STATE;
 	}
@@ -544,44 +811,26 @@ handle_input(ServerSession *s, const XtkMessage *msg)
 	return XTK_ERR_NONE;
 }
 
-static int
-handle_reset(ServerSession *s, const XtkMessage *msg, uint64_t now_ms)
-{
-	if (s->state != SERVER_SESSION_RUNNING &&
-	    s->state != SERVER_SESSION_RESULTS) {
-		emit_protocol_error(s, XTK_ERR_BAD_STATE, s->state,
-				    XTK_MSG_RESET);
-		return XTK_ERR_BAD_STATE;
-	}
-	if (!s->is_admin) {
-		emit_protocol_error(s, XTK_ERR_NOT_ADMIN, 0, XTK_MSG_RESET);
-		return XTK_ERR_NOT_ADMIN;
-	}
-	if (msg->body.reset.prior_epoch != s->epoch) {
-		emit_protocol_error(s, XTK_ERR_STALE_EPOCH,
-				    (uint16_t) s->epoch, XTK_MSG_RESET);
-		return XTK_ERR_STALE_EPOCH;
-	}
-	/* RESET is valid in Running and Results (PROTOCOL-v1 section 9): an
-	 * admin may end a live epoch early.  Clean up the running match first
-	 * so ownership and the world are released before the next epoch. */
-	if (s->state == SERVER_SESSION_RUNNING)
-		server_session_return_to_lobby(s);
-	if (server_session_begin(s, (uint32_t) (frame + 1), now_ms) !=
-	    SERVER_SESSION_OK) {
-		emit_protocol_error(s, XTK_ERR_BAD_STATE, s->state,
-				    XTK_MSG_RESET);
-		return XTK_ERR_BAD_STATE;
-	}
-	return XTK_ERR_NONE;
-}
-
 int
-server_session_message(ServerSession *s, const XtkMessage *msg, uint64_t now_ms)
+server_session_message(ServerSession *s, const XtkMessage *msg, uint64_t t)
 {
 	if (s == (ServerSession *) NULL || !s->used ||
-	    msg == (const XtkMessage *) NULL)
+	    msg == (const XtkMessage *) NULL || s->disconnected)
 		return XTK_ERR_BAD_STATE;
+
+	/*
+	 * A peer that has not completed a valid HELLO is only allowed to
+	 * handshake, ping or quit.  It must not be able to configure the shared
+	 * lobby, set readiness, start/reset or inject input before it is admitted.
+	 */
+	if (s->in_handshake &&
+	    msg->env.message_type != XTK_MSG_HELLO &&
+	    msg->env.message_type != XTK_MSG_PING &&
+	    msg->env.message_type != XTK_MSG_QUIT) {
+		emit_protocol_error(s, XTK_ERR_BAD_STATE, 0,
+				    msg->env.message_type);
+		return XTK_ERR_BAD_STATE;
+	}
 
 	switch (msg->env.message_type) {
 	  case XTK_MSG_PING: {
@@ -590,32 +839,145 @@ server_session_message(ServerSession *s, const XtkMessage *msg, uint64_t now_ms)
 		session_envelope(s, &pong, XTK_MSG_PONG, frame);
 		pong.body.ping.nonce = msg->body.ping.nonce;
 		(void) session_emit(s, &pong);
-		s->last_rx_ms = now_ms;
+		s->last_rx_ms = t;
 		return XTK_ERR_NONE;
 	  }
 	  case XTK_MSG_QUIT:
-		s->state = SERVER_SESSION_DISCONNECTED;
+		s->disconnected = 1;
 		return XTK_ERR_NONE;
 	  case XTK_MSG_HELLO:
-		return handle_hello(s, msg, now_ms);
+		return handle_hello(s, msg, t);
 	  case XTK_MSG_CONFIG_SELECT:
-		s->last_rx_ms = now_ms;
+		s->last_rx_ms = t;
 		return handle_config_select(s, msg);
 	  case XTK_MSG_READY:
-		s->last_rx_ms = now_ms;
-		return handle_ready(s);
+		s->last_rx_ms = t;
+		return handle_ready(s, msg);
+	  case XTK_MSG_START_REQUEST:
+		s->last_rx_ms = t;
+		return handle_start_request(s, msg, t);
 	  case XTK_MSG_RESET:
-		s->last_rx_ms = now_ms;
-		return handle_reset(s, msg, now_ms);
+		s->last_rx_ms = t;
+		return handle_reset(s, msg, t);
 	  case XTK_MSG_INPUT_BATCH:
 	  case XTK_MSG_RELIABLE_CMD:
-		s->last_rx_ms = now_ms;
+		s->last_rx_ms = t;
 		return handle_input(s, msg);
 	  default:
-		emit_protocol_error(s, XTK_ERR_BAD_STATE, s->state,
+		emit_protocol_error(s, XTK_ERR_BAD_STATE, lobby.state,
 				    msg->env.message_type);
 		return XTK_ERR_BAD_STATE;
 	}
+}
+
+/* ------------------------------------------------------------------ */
+/* Session admission                                                   */
+/* ------------------------------------------------------------------ */
+
+ServerSession *
+server_session_accept(TransportPeer *peer)
+{
+	ServerSession *s;
+	int i;
+
+	/* Lobby-only joins: a running/results epoch admits no new human. */
+	if (lobby.state != SERVER_SESSION_LOBBY)
+		return (ServerSession *) NULL;
+	if (n_sessions >= session_capacity)
+		return (ServerSession *) NULL;
+
+	for (i = 0; i < SERVER_SESSION_MAX_PEERS; i++) {
+		if (!peers[i].used)
+			break;
+	}
+	if (i >= SERVER_SESSION_MAX_PEERS)
+		return (ServerSession *) NULL;
+
+	s = &peers[i];
+	(void) memset(s, 0, sizeof(*s));
+	s->used = 1;
+	s->index = i;
+	s->in_handshake = 1;
+	s->session_id = lobby.next_session_id++;
+	s->controller_id = lobby.next_controller_id++;
+	s->binding = -1;
+	s->t = session_host;
+	s->peer = peer;
+	s->bound_slot = -1;
+	n_sessions++;
+	/* Administrator is assigned on successful HELLO (handle_hello), so a
+	 * half-open connection cannot hold the shared administrator role. */
+	return s;
+}
+
+void
+server_session_destroy(ServerSession *s)
+{
+	int i, was_admin;
+
+	if (s == (ServerSession *) NULL || !s->used)
+		return;
+
+	if (s->net != (ServerNetSession *) NULL) {
+		server_net_session_destroy(s->net);
+		s->net = (ServerNetSession *) NULL;
+	} else if (s->t != (Transport *) NULL &&
+		   s->peer != (TransportPeer *) NULL) {
+		transport_disconnect(s->t, s->peer);
+	}
+	if (s->bound_slot >= 0)
+		server_players_unbind_slot(s->bound_slot);
+
+	was_admin = (lobby.admin_index == s->index);
+	s->used = 0;
+	if (n_sessions > 0)
+		n_sessions--;
+
+	if (was_admin) {
+		lobby.admin_index = -1;
+		for (i = 0; i < SERVER_SESSION_MAX_PEERS; i++) {
+			if (peer_active(&peers[i])) {
+				lobby.admin_index = i;
+				break;
+			}
+		}
+	}
+
+	if (n_sessions == 0) {
+		/* Empty server: clean the world and wait in the lobby. */
+		if (lobby.state != SERVER_SESSION_LOBBY)
+			server_match_reset();
+		lobby.epoch_live = 0;
+		lobby.state = SERVER_SESSION_LOBBY;
+	} else {
+		broadcast_lobby_state();
+	}
+}
+
+void
+server_session_reject_peer(Transport *t, TransportPeer *peer,
+			   uint16_t error_code, const char *text)
+{
+	XtkMessage m;
+	size_t len;
+	int e;
+
+	if (t == (Transport *) NULL || peer == (TransportPeer *) NULL)
+		return;
+	(void) memset(&m, 0, sizeof(m));
+	m.env.message_type = XTK_MSG_REJECT;
+	m.env.session_id = 0;
+	m.body.reject.error_code = error_code;
+	m.body.reject.detail_code = 0;
+	if (text != NULL) {
+		(void) strncpy(m.body.reject.text, text,
+			       XTK_MAX_ERROR_TEXT_BYTES);
+		m.body.reject.text[XTK_MAX_ERROR_TEXT_BYTES] = '\0';
+	}
+	e = xtk_encode(txbuf, sizeof(txbuf), &m, &len);
+	if (e == XTK_ERR_NONE)
+		(void) transport_send(t, peer, XTK_CH_CONTROL, txbuf, len);
+	transport_disconnect(t, peer);
 }
 
 /* ------------------------------------------------------------------ */
@@ -625,55 +987,131 @@ server_session_message(ServerSession *s, const XtkMessage *msg, uint64_t now_ms)
 int
 server_session_can_start(const ServerSession *s)
 {
-	return s != (const ServerSession *) NULL && s->used && s->is_admin &&
-	       s->state == SERVER_SESSION_LOBBY && s->config_valid && s->ready;
+	return lobby.state == SERVER_SESSION_LOBBY &&
+	       lobby.config_valid && lobby.admin_index >= 0 &&
+	       server_session_all_ready(s);
+}
+
+/* Solo fixes exactly one drone; two humans select 0..2 (D3-B). */
+static uint8_t
+effective_drones(int n_humans)
+{
+	uint8_t d;
+
+	if (n_humans <= 1)
+		return (uint8_t) XTK_SOLO_DRONES;
+	d = lobby.drone_count;
+	if (d > XTK_MAX_DRONES)
+		d = XTK_MAX_DRONES;
+	return d;
+}
+
+/* Bind every admitted peer to a deterministic slot (roster order -> slot). */
+static int
+bind_humans(int *out_count)
+{
+	int i, n = 0;
+
+	for (i = 0; i < SERVER_SESSION_MAX_PEERS; i++) {
+		ServerSession *p = &peers[i];
+		int b;
+
+		if (!peer_active(p))
+			continue;
+		b = server_players_add(p->name, (int) p->controller_id);
+		if (b < 0)
+			return -1;
+		if (server_players_bind_slot(b, n) != 0)
+			return -1;
+		p->binding = b;
+		p->bound_slot = n;
+		p->generation = server_players_binding(b)->generation;
+		n++;
+	}
+	*out_count = n;
+	return 0;
 }
 
 static void
-build_combatants(int vdesc_index, const char *human, int human_binding)
+build_combatants(int n_humans, int drones, int vdesc_index)
 {
-	Combatant *c;
+	int i, j;
 
-	num_combatants = 2;
+	num_combatants = n_humans + drones;
+	for (i = 0; i < MAX_VEHICLES; i++) {
+		combatant[i].num_players = 0;
+		combatant[i].num_programs = 0;
+	}
 
-	c = &combatant[0];
-	c->num_players = 1;
-	c->player[0] = (human_binding >= 0) ? human_binding : 255;
-	c->num_programs = 0;
-	c->team = 1 % MAX_TEAMS;
-	c->vdesc = vdesc_index;
-	(void) strncpy(c->name, human, MAX_STRING - 1);
-	c->name[MAX_STRING - 1] = '\0';
+	for (i = 0; i < SERVER_SESSION_MAX_PEERS; i++) {
+		ServerSession *p = &peers[i];
+		Combatant *c;
+		int slot;
 
-	c = &combatant[1];
-	c->num_players = 0;
-	c->num_programs = 1;
-	c->program[0] = 0;		/* drone is the only shipped program */
-	c->team = 2 % MAX_TEAMS;
-	c->vdesc = vdesc_index;
-	(void) strncpy(c->name, "drone", MAX_STRING - 1);
-	c->name[MAX_STRING - 1] = '\0';
+		if (p->bound_slot < 0)
+			continue;
+		slot = p->bound_slot;
+		c = &combatant[slot];
+		c->num_players = 1;
+		c->player[0] = p->binding;
+		c->num_programs = 0;
+		c->team = (slot + 1) % MAX_TEAMS;
+		c->vdesc = vdesc_index;
+		(void) memset(c->name, 0, sizeof(c->name));
+		(void) strncpy(c->name, p->name, MAX_STRING - 1);
+		c->name[MAX_STRING - 1] = '\0';
+	}
+
+	for (j = 0; j < drones; j++) {
+		Combatant *c = &combatant[n_humans + j];
+
+		c->num_players = 0;
+		c->num_programs = 1;
+		c->program[0] = 0;	/* drone is the only shipped program */
+		c->team = (n_humans + j + 1) % MAX_TEAMS;
+		c->vdesc = vdesc_index;
+		(void) memset(c->name, 0, sizeof(c->name));
+		(void) strncpy(c->name, "drone", MAX_STRING - 1);
+		c->name[MAX_STRING - 1] = '\0';
+	}
+}
+
+static void
+begin_unbind_all(void)
+{
+	int i;
+
+	for (i = 0; i < SERVER_SESSION_MAX_PEERS; i++) {
+		ServerSession *p = &peers[i];
+
+		if (p->bound_slot >= 0)
+			server_players_unbind_slot(p->bound_slot);
+		p->bound_slot = -1;
+		p->generation = 0;
+	}
 }
 
 int
-server_session_begin(ServerSession *s, uint32_t start_tick, uint64_t now_ms)
+server_session_begin(ServerSession *s, uint32_t start_tick, uint64_t t)
 {
 	const XtkContentEntry *mz, *vh;
 	XtkMessage m;
-	int vdesc_index, mdesc_index, hb;
-	unsigned int gen;
+	int vdesc_index, mdesc_index;
+	int n_humans = 0, i;
+	uint8_t drones;
 
-	if (s == (ServerSession *) NULL || !s->used)
+	if (lobby.state != SERVER_SESSION_LOBBY)
 		return SERVER_SESSION_ERR_STATE;
-	if (!s->is_admin)
+	if (lobby.admin_index < 0)
 		return SERVER_SESSION_ERR_NOT_ADMIN;
-	if (s->state == SERVER_SESSION_RUNNING)
-		return SERVER_SESSION_ERR_STATE;
-	if (!s->config_valid)
+	if (s != (ServerSession *) NULL && s->used &&
+	    s->index != lobby.admin_index)
+		return SERVER_SESSION_ERR_NOT_ADMIN;
+	if (!lobby.config_valid)
 		return SERVER_SESSION_ERR_STATE;
 
-	mz = xtk_content_lookup(s->maze_id);
-	vh = xtk_content_lookup(s->vehicle_id);
+	mz = xtk_content_lookup(lobby.maze_id);
+	vh = xtk_content_lookup(lobby.vehicle_id);
 	if (mz == (const XtkContentEntry *) NULL ||
 	    vh == (const XtkContentEntry *) NULL)
 		return SERVER_SESSION_ERR_NO_CONTENT;
@@ -688,107 +1126,146 @@ server_session_begin(ServerSession *s, uint32_t start_tick, uint64_t now_ms)
 	/* Rebase the monotonic pacer for the new epoch (no-op in fast mode). */
 	server_loop_epoch_begin();
 
-	s->epoch++;
-	s->ready = 0;
+	for (i = 0; i < SERVER_SESSION_MAX_PEERS; i++) {
+		ServerSession *p = &peers[i];
 
+		if (peer_active(p))
+			n_humans++;
+	}
+	if (n_humans < 1)
+		return SERVER_SESSION_ERR_STATE;
+	drones = effective_drones(n_humans);
+
+	lobby.epoch++;
 	server_players_init();
-	hb = server_players_add(s->name, (int) s->session_id);
-	if (hb < 0)
-		hb = server_players_add("player", (int) s->session_id);
-	if (hb < 0 || server_players_bind_slot(hb, 0) != 0)
+	for (i = 0; i < SERVER_SESSION_MAX_PEERS; i++) {
+		ServerSession *p = &peers[i];
+
+		if (!p->used)
+			continue;
+		p->bound_slot = -1;
+		p->generation = 0;
+		p->snapshot_seq = 0;
+		p->events_sent = 0;
+		p->ready = 0;
+	}
+
+	if (bind_humans(&n_humans) != 0) {
+		begin_unbind_all();
+		lobby.epoch--;
+		lobby.state = SERVER_SESSION_LOBBY;
 		return SERVER_SESSION_ERR_MATCH;
-	gen = server_players_binding(hb)->generation;
+	}
+	build_combatants(n_humans, drones, vdesc_index);
 
-	build_combatants(vdesc_index, s->name, hb);
-
-	server_events_reset(s->epoch, start_tick);
-	if (server_match_init() != GAME_RUNNING)
+	server_events_reset(lobby.epoch, start_tick);
+	if (server_match_init() != GAME_RUNNING) {
+		begin_unbind_all();
+		server_match_reset();
+		lobby.epoch--;
+		lobby.state = SERVER_SESSION_LOBBY;
 		return SERVER_SESSION_ERR_MATCH;
+	}
 
-	if (s->net == (ServerNetSession *) NULL)
-		s->net = server_net_session_create(s->peer);
-	if (s->net == (ServerNetSession *) NULL)
-		return SERVER_SESSION_ERR_MATCH;
-	(void) server_net_session_bind(s->net, (int) s->session_id, 0, gen);
-	server_net_session_begin_epoch(s->net, s->epoch, (int) start_tick);
+	for (i = 0; i < SERVER_SESSION_MAX_PEERS; i++) {
+		ServerSession *p = &peers[i];
 
-	s->bound_slot = 0;
-	s->generation = gen;
-	s->snapshot_seq = 0;
-	s->events_sent = 0;
-	s->epoch_live = 1;
-	s->last_rx_ms = now_ms;
-	s->state = SERVER_SESSION_RUNNING;
+		if (!peer_active(p))
+			continue;
+		if (p->net == (ServerNetSession *) NULL)
+			p->net = server_net_session_create(p->peer);
+		if (p->net == (ServerNetSession *) NULL) {
+			begin_unbind_all();
+			server_match_reset();
+			lobby.epoch--;
+			lobby.state = SERVER_SESSION_LOBBY;
+			return SERVER_SESSION_ERR_MATCH;
+		}
+		(void) server_net_session_bind(p->net, (int) p->controller_id,
+					       p->bound_slot, p->generation);
+		server_net_session_begin_epoch(p->net, lobby.epoch,
+					       (int) start_tick);
+		p->last_rx_ms = t;
+	}
 
-	session_envelope(s, &m, XTK_MSG_START, (int32_t) start_tick);
-	m.env.epoch = s->epoch;
-	m.body.start.start_tick = start_tick;
-	m.body.start.maze_id = s->maze_id;
-	m.body.start.vehicle_id = (uint8_t) s->vehicle_id;
-	(void) session_emit(s, &m);
+	lobby.epoch_live = 1;
+	lobby.state = SERVER_SESSION_RUNNING;
 
-	session_envelope(s, &m, XTK_MSG_EPOCH_BEGIN, (int32_t) start_tick);
-	m.env.epoch = s->epoch;
-	m.body.epoch_begin.epoch = s->epoch;
-	m.body.epoch_begin.first_tick = start_tick;
-	(void) session_emit(s, &m);
+	for (i = 0; i < SERVER_SESSION_MAX_PEERS; i++) {
+		ServerSession *p = &peers[i];
 
+		if (!peer_active(p))
+			continue;
+		session_envelope(p, &m, XTK_MSG_START, (int32_t) start_tick);
+		m.env.epoch = lobby.epoch;
+		m.body.start.start_tick = start_tick;
+		m.body.start.maze_id = lobby.maze_id;
+		m.body.start.vehicle_id = lobby.vehicle_id;	/* full u16 (P3.4 fix) */
+		m.body.start.drone_count = drones;
+		m.body.start.config_revision = lobby.config_revision;
+		(void) session_emit(p, &m);
+
+		session_envelope(p, &m, XTK_MSG_EPOCH_BEGIN,
+				 (int32_t) start_tick);
+		m.env.epoch = lobby.epoch;
+		m.body.epoch_begin.epoch = lobby.epoch;
+		m.body.epoch_begin.first_tick = start_tick;
+		(void) session_emit(p, &m);
+	}
 	return SERVER_SESSION_OK;
 }
 
 static void
-session_deliver(ServerSession *s, int status)
+session_deliver(ServerSession *p)
 {
 	XtkMessage m;
 
-	/* Authorized snapshot on channel 1 (unreliable sequenced). */
-	{
+	if (p->bound_slot >= 0) {
 		static XtkViewSnapshot snap;
-		uint16_t flags = (s->snapshot_seq == 0) ? XTK_FLAG_KEYFRAME : 0;
+		uint16_t flags = (p->snapshot_seq == 0) ? XTK_FLAG_KEYFRAME : 0;
 
-		if (server_view_export(s->bound_slot, 0, s->snapshot_seq, flags,
+		if (server_view_export(p->bound_slot, 0, p->snapshot_seq, flags,
 				       &snap) == SERVER_VIEW_OK) {
-			session_envelope(s, &m, XTK_MSG_VIEW_SNAPSHOT, frame);
-			m.env.epoch = s->epoch;
+			session_envelope(p, &m, XTK_MSG_VIEW_SNAPSHOT, frame);
+			m.env.epoch = lobby.epoch;
 			m.body.view_snapshot = snap;
-			m.body.view_snapshot.snapshot_sequence = s->snapshot_seq;
+			m.body.view_snapshot.snapshot_sequence = p->snapshot_seq;
 			m.body.view_snapshot.server_tick = (uint32_t) frame;
 			m.body.view_snapshot.flags = flags;
-			(void) session_emit(s, &m);
-			s->snapshot_seq++;
+			(void) session_emit(p, &m);
+			p->snapshot_seq++;
 		}
 	}
 
-	/* Pending events on channel 0 (reliable ordered), dedup by sequence. */
 	{
 		int n = server_events_count();
 		int i;
 
-		for (i = s->events_sent; i < n; i++) {
+		for (i = p->events_sent; i < n; i++) {
 			const XtkEvent *e = server_events_event(i);
 
 			if (e == (const XtkEvent *) NULL)
 				continue;
-			session_envelope(s, &m, XTK_MSG_EVENT, frame);
-			m.env.epoch = s->epoch;
+			session_envelope(p, &m, XTK_MSG_EVENT, frame);
+			m.env.epoch = lobby.epoch;
 			m.body.event = *e;
-			(void) session_emit(s, &m);
+			(void) session_emit(p, &m);
 		}
-		if (n > s->events_sent)
-			s->events_sent = n;
+		if (n > p->events_sent)
+			p->events_sent = n;
 	}
-	(void) status;
 }
 
 static void
-session_neutralize(ServerSession *s)
+session_neutralize(ServerSession *p)
 {
 	Intent in;
 
-	/* Neutral drive then neutral fire: stop, do not fire, at teardown. */
+	if (p->bound_slot < 0)
+		return;
 	(void) memset(&in, 0, sizeof(in));
 	in.tick = frame + 1;
-	in.player = s->bound_slot;
+	in.player = p->bound_slot;
 	in.sequence = 0;
 	in.op = INTENT_DRIVE_REL;
 	in.a = 0.0;
@@ -800,26 +1277,35 @@ session_neutralize(ServerSession *s)
 }
 
 int
-server_session_step(ServerSession *s, uint64_t now_ms)
+server_session_step(ServerSession *s, uint64_t t)
 {
-	int status;
+	int status, i;
 
-	if (s == (ServerSession *) NULL || s->state != SERVER_SESSION_RUNNING)
+	(void) s;
+	if (lobby.state != SERVER_SESSION_RUNNING)
 		return SERVER_SESSION_ERR_STATE;
 
-	/* D2-F solo abort: two seconds without valid traffic. */
-	if (s->last_rx_ms != 0 &&
-	    now_ms - s->last_rx_ms > (uint64_t) XTK_NEUTRAL_TIMEOUT_MS) {
-		session_neutralize(s);
-		server_session_finish(s, GAME_OVER);
-		server_session_return_to_lobby(s);
-		return GAME_OVER;
+	/* D2-F timeout: two seconds without valid traffic from any peer. */
+	for (i = 0; i < SERVER_SESSION_MAX_PEERS; i++) {
+		ServerSession *p = &peers[i];
+
+		if (!peer_active(p) || p->last_rx_ms == 0)
+			continue;
+		if (t - p->last_rx_ms > (uint64_t) XTK_NEUTRAL_TIMEOUT_MS) {
+			session_neutralize(p);
+			server_session_finish(s, GAME_OVER);
+			server_session_return_to_lobby(s);
+			return GAME_OVER;
+		}
 	}
 
 	status = server_step();
 	server_events_observe();
 	server_net_post_step(frame);
-	session_deliver(s, status);
+	for (i = 0; i < SERVER_SESSION_MAX_PEERS; i++) {
+		if (peer_active(&peers[i]))
+			session_deliver(&peers[i]);
+	}
 
 	if (status != GAME_RUNNING)
 		server_session_finish(s, status);
@@ -831,37 +1317,39 @@ server_session_finish(ServerSession *s, int status)
 {
 	XtkMessage m;
 	XtkResults r;
+	int i, valid;
 
-	if (s == (ServerSession *) NULL || !s->used)
-		return;
-	if (s->state != SERVER_SESSION_RUNNING)
+	(void) s;
+	if (lobby.state != SERVER_SESSION_RUNNING)
 		return;
 
 	/* Finalize once through the shared result path (captures results before
 	 * the per-match score reset); no graphical stats wait. */
 	(void) game_results(status);
 
-	if (server_events_results_valid() &&
-	    server_events_results(&r) == SERVER_EVENTS_OK) {
-		session_envelope(s, &m, XTK_MSG_RESULTS, (int32_t) r.end_tick);
-		m.env.epoch = s->epoch;
+	valid = server_events_results_valid() &&
+		server_events_results(&r) == SERVER_EVENTS_OK;
+	for (i = 0; i < SERVER_SESSION_MAX_PEERS; i++) {
+		ServerSession *p = &peers[i];
+
+		if (!peer_active(p) || !valid)
+			continue;
+		session_envelope(p, &m, XTK_MSG_RESULTS, (int32_t) r.end_tick);
+		m.env.epoch = lobby.epoch;
 		m.body.results = r;
-		(void) session_emit(s, &m);
+		(void) session_emit(p, &m);
 	}
-	s->state = SERVER_SESSION_RESULTS;
+	lobby.state = SERVER_SESSION_RESULTS;
 }
 
 void
 server_session_return_to_lobby(ServerSession *s)
 {
-	if (s == (ServerSession *) NULL || !s->used)
+	(void) s;
+	if (lobby.state == SERVER_SESSION_LOBBY)
 		return;
-	server_match_reset();
-	if (s->bound_slot >= 0)
-		server_players_unbind_slot(s->bound_slot);
-	s->epoch_live = 0;
-	s->ready = 0;
-	s->state = SERVER_SESSION_LOBBY;
+	shared_clear_match();
+	broadcast_lobby_state();
 }
 
 /* ------------------------------------------------------------------ */
@@ -869,30 +1357,30 @@ server_session_return_to_lobby(ServerSession *s)
 /* ------------------------------------------------------------------ */
 
 int
-server_session_service(uint64_t now_ms)
+server_session_service(uint64_t t)
 {
-	Transport *t = session_host;
+	Transport *host = session_host;
 	ServerSession *s;
 	TransportPeer *p;
-	int events = 0;
+	int events = 0, i;
 
-	if (t == (Transport *) NULL)
+	if (host == (Transport *) NULL)
 		return 0;
 
-	events = transport_service(t, (int) SERVER_SESSION_STEP_BUDGET);
+	events = transport_service(host, (int) SERVER_SESSION_STEP_BUDGET);
 	if (events < 0)
 		events = 0;
 
-	while (transport_poll_connect(t, &p)) {
-		if (server_session_count() > 0) {
-			/* One-peer slice: reject the second peer explicitly. */
-			server_session_reject_peer(t, p, XTK_ERR_SESSION_FULL,
+	while (transport_poll_connect(host, &p)) {
+		if (lobby.state != SERVER_SESSION_LOBBY ||
+		    n_sessions >= session_capacity) {
+			server_session_reject_peer(host, p, XTK_ERR_SESSION_FULL,
 						   "session full");
 		} else {
 			(void) server_session_accept(p);
 		}
 	}
-	while (transport_poll_disconnect(t, &p)) {
+	while (transport_poll_disconnect(host, &p)) {
 		s = session_for_peer(p);
 		if (s != (ServerSession *) NULL)
 			server_session_destroy(s);
@@ -903,7 +1391,7 @@ server_session_service(uint64_t now_ms)
 		size_t len = 0;
 		uint8_t ch = 0;
 		XtkMessage msg;
-		int r = transport_receive(t, &p, buf, sizeof(buf), &len, &ch);
+		int r = transport_receive(host, &p, buf, sizeof(buf), &len, &ch);
 
 		if (r <= 0)
 			break;
@@ -912,18 +1400,21 @@ server_session_service(uint64_t now_ms)
 			continue;
 		if (xtk_decode(buf, len, &msg) != XTK_ERR_NONE)
 			continue;
-		(void) server_session_message(s, &msg, now_ms);
+		(void) server_session_message(s, &msg, t);
 	}
 
-	s = server_session_current();
-	if (s != (ServerSession *) NULL &&
-	    s->state == SERVER_SESSION_DISCONNECTED)
-		server_session_destroy(s);
+	/* Reclaim peers that quit or failed their handshake. */
+	for (i = 0; i < SERVER_SESSION_MAX_PEERS; i++) {
+		if (peers[i].used && peers[i].disconnected)
+			server_session_destroy(&peers[i]);
+	}
 
-	/* Start automatically once admin + config + ready. */
-	s = server_session_current();
-	if (s != (ServerSession *) NULL && server_session_can_start(s))
-		(void) server_session_begin(s, (uint32_t) (frame + 1), now_ms);
+	/* Solo auto-start: suppressed as soon as a second human is present. */
+	if (lobby.state == SERVER_SESSION_LOBBY && lobby.config_valid &&
+	    n_sessions == 1 && server_session_can_start(
+		    server_session_current()))
+		(void) server_session_begin(server_session_current(),
+					    (uint32_t) (frame + 1), t);
 
 	return events;
 }
@@ -931,24 +1422,26 @@ server_session_service(uint64_t now_ms)
 int
 server_session_run(uint16_t port, int fast, long max_ticks)
 {
-	Transport *t;
+	Transport *host;
 	long epoch_ticks = 0;
-	int had_peer = 0;
 
 	server_session_init();
+	server_session_set_capacity(XTK_MAX_HUMANS);
 
-	t = transport_create(port, SERVER_SESSION_MAX_PEERS);
-	if (t == (Transport *) NULL) {
+	host = transport_create(port, SERVER_SESSION_MAX_PEERS);
+	if (host == (Transport *) NULL) {
 		fprintf(stderr, "xtank-server: cannot listen on port %u\n",
 			(unsigned) port);
 		return 1;
 	}
-	server_session_set_transport(t);
+	server_session_set_transport(host);
 
-	printf("SERVER-LISTEN port=%u hz=%d\n", (unsigned) transport_port(t),
-	       server_loop_hz());
+	printf("SERVER-LISTEN port=%u hz=%d humans=%d\n",
+	       (unsigned) transport_port(host), server_loop_hz(),
+	       server_session_capacity());
 	(void) fflush(stdout);
 
+	/* The service stays alive across empty-session lobby cycles. */
 	for (;;) {
 		ServerSession *s;
 		uint64_t now = now_ms();
@@ -956,21 +1449,7 @@ server_session_run(uint16_t port, int fast, long max_ticks)
 		(void) server_session_service(now);
 
 		s = server_session_current();
-		if (s == (ServerSession *) NULL) {
-			struct timespec ts = { 0, 5000000 };
-
-			if (had_peer) {
-				/* The peer quit; the listen run is complete. */
-				break;
-			}
-			(void) nanosleep(&ts, NULL);
-			continue;
-		}
-
-		had_peer = 1;
-
-		if (s == (ServerSession *) NULL ||
-		    s->state != SERVER_SESSION_RUNNING) {
+		if (s == (ServerSession *) NULL || lobby.state != SERVER_SESSION_RUNNING) {
 			struct timespec ts = { 0, 5000000 };
 
 			(void) nanosleep(&ts, NULL);
@@ -995,7 +1474,7 @@ server_session_run(uint16_t port, int fast, long max_ticks)
 		}
 	}
 
-	transport_destroy(t);
+	transport_destroy(host);
 	return 0;
 }
 
