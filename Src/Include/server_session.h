@@ -163,6 +163,16 @@ int server_session_message(ServerSession *s, const XtkMessage *msg,
 			   uint64_t now_ms);
 
 /*
+ * Channel-aware variant (P3.6).  `channel` is the actual transport channel
+ * the datagram arrived on; INPUT_BATCH/RELIABLE_CMD on the wrong channel are
+ * rejected with PROTOCOL_ERROR/XTK_ERR_BAD_CHANNEL before any intent or
+ * state change, and never refresh the valid-input timeout.  The listen loop
+ * uses this; the three-argument form assumes the message's own class.
+ */
+int server_session_message_ch(ServerSession *s, const XtkMessage *msg,
+			      uint8_t channel, uint64_t now_ms);
+
+/*
  * 1 when the shared coordinator may start: administrator present, running
  * epoch not live, a config has been accepted and every admitted peer is ready.
  */
