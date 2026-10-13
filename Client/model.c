@@ -41,8 +41,13 @@ static double dist2(double ax, double ay, double bx, double by)
 	return dx * dx + dy * dy;
 }
 
+/*
+ * Full-width lifetime key: a vehicle is (slot, generation) with the u32
+ * entity-life generation, so a reuse of a slot after death/respawn (or a
+ * generation past 255) can never alias the previous life.
+ */
 static const XtkVehicleView *find_vehicle(const XtkViewSnapshot *s,
-					  uint8_t slot, uint8_t generation)
+					  uint8_t slot, uint32_t generation)
 {
 	int i;
 	for (i = 0; i < (int)s->vehicle_count; i++) {
@@ -54,27 +59,42 @@ static const XtkVehicleView *find_vehicle(const XtkViewSnapshot *s,
 	return NULL;
 }
 
+/*
+ * Full-width bullet key: (id, owner_slot, owner_generation, generation).  The
+ * bullet's own u32 life generation is required in addition to the owner
+ * reference, so the same owner reusing a bullet slot (or a slot reaching a
+ * generation past 255) is never blended with the previous projectile.
+ */
 static const XtkBulletView *find_bullet(const XtkViewSnapshot *s,
 					uint16_t id, uint8_t owner_slot,
-					uint8_t owner_generation)
+					uint32_t owner_generation,
+					uint32_t generation)
 {
 	int i;
 	for (i = 0; i < (int)s->bullet_count; i++) {
 		if (s->bullet[i].id == id &&
 		    s->bullet[i].owner_slot == owner_slot &&
-		    s->bullet[i].owner_generation == owner_generation) {
+		    s->bullet[i].owner_generation == owner_generation &&
+		    s->bullet[i].generation == generation) {
 			return &s->bullet[i];
 		}
 	}
 	return NULL;
 }
 
+/*
+ * Full-width explosion key: (id, generation).  The u32 transient life
+ * generation distinguishes a same-slot, same-kind reuse, so an explosion that
+ * reappears in a reused slot is snapped rather than interpolated from the
+ * previous transient.
+ */
 static const XtkExplosionView *find_explosion(const XtkViewSnapshot *s,
-					      uint16_t id)
+					      uint16_t id, uint32_t generation)
 {
 	int i;
 	for (i = 0; i < (int)s->explosion_count; i++) {
-		if (s->explosion[i].id == id) {
+		if (s->explosion[i].id == id &&
+		    s->explosion[i].generation == generation) {
 			return &s->explosion[i];
 		}
 	}
@@ -133,7 +153,8 @@ static void build_bullets(XtkViewSnapshot *out, const XtkViewSnapshot *lo,
 	for (i = 0; i < (int)lo->bullet_count; i++) {
 		const XtkBulletView *b = &lo->bullet[i];
 		const XtkBulletView *h = find_bullet(hi, b->id, b->owner_slot,
-						     b->owner_generation);
+						     b->owner_generation,
+						     b->generation);
 		if (h == NULL) {
 			continue;
 		}
@@ -149,7 +170,7 @@ static void build_bullets(XtkViewSnapshot *out, const XtkViewSnapshot *lo,
 	for (i = 0; i < (int)hi->bullet_count; i++) {
 		const XtkBulletView *h = &hi->bullet[i];
 		if (find_bullet(lo, h->id, h->owner_slot,
-				h->owner_generation) != NULL) {
+				h->owner_generation, h->generation) != NULL) {
 			continue;
 		}
 		if (n < (int)XTK_MAX_BULLETS) {
@@ -166,7 +187,8 @@ static void build_explosions(XtkViewSnapshot *out, const XtkViewSnapshot *lo,
 
 	for (i = 0; i < (int)lo->explosion_count; i++) {
 		const XtkExplosionView *b = &lo->explosion[i];
-		const XtkExplosionView *h = find_explosion(hi, b->id);
+		const XtkExplosionView *h = find_explosion(hi, b->id,
+							   b->generation);
 		if (h == NULL) {
 			continue;
 		}
@@ -179,7 +201,7 @@ static void build_explosions(XtkViewSnapshot *out, const XtkViewSnapshot *lo,
 	}
 	for (i = 0; i < (int)hi->explosion_count; i++) {
 		const XtkExplosionView *h = &hi->explosion[i];
-		if (find_explosion(lo, h->id) != NULL) {
+		if (find_explosion(lo, h->id, h->generation) != NULL) {
 			continue;
 		}
 		if (n < (int)XTK_MAX_EXPLOSIONS) {
