@@ -81,6 +81,21 @@ static int lifecycle_extra = -1;
 static int lifecycle_done = 0;
 static int lifecycle_epochs = 0;
 
+/*
+** P3.7 departed-combatant registry.
+**
+** A departed vehicle is removed from live_vehicles[]/dead_vehicles[] but its
+** storage is retained until the match resets, so an in-flight projectile that
+** still points at it (Bullet.owner plus the disc/special references) stays
+** valid and keeps following the unchanged projectile rules.  At reset every
+** retained record is reattached to the dead list before game_cleanup() so the
+** existing cleanup path frees its thread/stack/special storage.  Slots are
+** stable for the match, so the registry is keyed by vehicle/combatant number.
+*/
+static int departed_slot[MAX_VEHICLES];
+static Vehicle *departed_vehicle[MAX_VEHICLES];
+static int num_departed;
+
 static void
 lifecycle_probe(void)
 {
@@ -394,13 +409,96 @@ server_consume_intents(int tick)
 	return intent_consume(tick);
 }
 
+/*
+** P3.7 departure removal.  See server.h and P3.2-REPORT.md section 4 for the
+** reviewed mutation/order/retention contract.
+*/
+void
+server_depart_vehicle(int slot)
+{
+	extern int num_veh_alive, num_veh_dead;
+	extern Vehicle actual_vehicles[];
+	extern Vehicle *live_vehicles[];
+	extern Vehicle *dead_vehicles[];
+	Vehicle *v;
+	int i;
+
+	if (slot < 0 || slot >= MAX_VEHICLES)
+		return;
+	v = &actual_vehicles[slot];
+
+	/* A live tank is made not-alive without a kill: no explosion, no
+	   deaths++/score, no RNG draw and no respawn.  A respawn-waiting tank
+	   is simply taken off the dead list.  Never unmake here: projectile
+	   owners must stay valid until the match resets. */
+	if (tstflag(v->status, VS_is_alive))
+		inactivate_vehicle(v);
+
+	for (i = 0; i < num_veh_alive; i++) {
+		if (live_vehicles[i] == v) {
+			live_vehicles[i] = live_vehicles[--num_veh_alive];
+			break;
+		}
+	}
+	for (i = 0; i < num_veh_dead; i++) {
+		if (dead_vehicles[i] == v) {
+			dead_vehicles[i] = dead_vehicles[--num_veh_dead];
+			break;
+		}
+	}
+
+	/* Record once for reset-time release.  teamdata/num_teams/scores/kills/
+	   deaths are deliberately untouched (no gameplay-rule change). */
+	for (i = 0; i < num_departed; i++)
+		if (departed_slot[i] == slot)
+			return;
+	if (num_departed < MAX_VEHICLES) {
+		departed_slot[num_departed] = slot;
+		departed_vehicle[num_departed] = v;
+		num_departed++;
+	}
+}
+
+int
+server_slot_departed(int slot)
+{
+	int i;
+
+	if (slot < 0 || slot >= MAX_VEHICLES)
+		return 0;
+	for (i = 0; i < num_departed; i++)
+		if (departed_slot[i] == slot)
+			return 1;
+	return 0;
+}
+
+int
+server_departed_count(void)
+{
+	return num_departed;
+}
+
 void
 server_match_reset(void)
 {
 	extern int num_veh_alive, num_veh_dead;
 	extern int num_terminals;
 	extern Terminal *terminal[];
+	extern Vehicle *dead_vehicles[];
 	int i;
+
+	/*
+	 * P3.7: release every retained departed record through the normal
+	 * cleanup path.  By reset time the finished match's projectiles are
+	 * gone (no server_step runs between reset and the next init_bset), so
+	 * reattaching each retained vehicle to the dead list lets game_cleanup()
+	 * unmake its thread/stack/special storage exactly once.
+	 */
+	for (i = 0; i < num_departed; i++) {
+		if (num_veh_dead < MAX_VEHICLES)
+			dead_vehicles[num_veh_dead++] = departed_vehicle[i];
+	}
+	num_departed = 0;
 
 	game_cleanup();
 
