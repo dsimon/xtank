@@ -530,6 +530,18 @@ int session_client_send_input(XtkSessionClient *c, const XtkMessage *batch)
 	return sc_send(c, &m, XTK_CH_INPUT);
 }
 
+int session_client_send_input_reliable(XtkSessionClient *c,
+				       const XtkMessage *reliable)
+{
+	XtkMessage m;
+
+	if (c == NULL || reliable == NULL) {
+		return -1;
+	}
+	m = *reliable;
+	return sc_send(c, &m, XTK_CH_CONTROL);
+}
+
 /* ---- accessors ------------------------------------------------------- */
 
 XtkSessionState session_client_state(const XtkSessionClient *c)
