@@ -61,6 +61,24 @@ extern Map real_map;
 	(VS_functioning | VS_is_alive | VS_was_alive | VS_disc_spin | \
 	 VS_rel_turret | VS_sliding | VS_permanently_dead)
 
+/*
+** Recipient-local mapper metadata (D3-C): `map_revision` must never disclose
+** the global mapper-update counter.  Each controlled slot keeps its own
+** revision that advances only when that recipient's remembered knowledge
+** changes, tracked by a read-only fingerprint of its Mapper.map.
+*/
+static uint32_t view_map_rev[MAX_VEHICLES];
+static unsigned long view_map_fp[MAX_VEHICLES];
+static uint8_t view_map_fp_valid[MAX_VEHICLES];
+
+void
+server_view_reset(void)
+{
+	(void) memset(view_map_rev, 0, sizeof(view_map_rev));
+	(void) memset(view_map_fp, 0, sizeof(view_map_fp));
+	(void) memset(view_map_fp_valid, 0, sizeof(view_map_fp_valid));
+}
+
 static uint16_t
 clamp_u16_double(double v)
 {
@@ -119,14 +137,35 @@ explosion_kind(const Exp *e)
 	return 0xFF;
 }
 
+/* Read-only FNV-1a fingerprint of a recipient's remembered mapper knowledge. */
+static unsigned long
+mapper_fingerprint(const Mapper *m)
+{
+	unsigned long h = 2166136261UL;
+	int x, y;
+
+	for (x = 0; x < GRID_WIDTH; x++)
+		for (y = 0; y < GRID_HEIGHT; y++) {
+			const Box *b = &m->map[x][y];
+			unsigned int v = (b->flags ? 1u : 0u) |
+				((unsigned int) b->type << 1) |
+				((unsigned int) b->team << 8) |
+				((unsigned int) b->strength << 16);
+
+			h ^= (unsigned long) v;
+			h *= 16777619UL;
+		}
+	return h;
+}
+
 static void
 export_self(const Vehicle *own, XtkSelfState *s)
 {
 	int i;
 
 	s->slot = (uint8_t) own->number;
-	s->generation = (uint8_t) server_events_generation(XTK_ENTITY_VEHICLE,
-							   (uint16_t) own->number);
+	s->generation = server_events_generation(XTK_ENTITY_VEHICLE,
+						 (uint16_t) own->number);
 	s->lifecycle_flags = lifecycle_flags(own);
 
 	s->armor[0] = clamp_u16_int(own->armor.side[FRONT]);
@@ -188,8 +227,8 @@ server_view_export(int player_slot, unsigned int generation,
 	out->server_tick = (uint32_t) frame;
 	out->flags = flags;
 	out->own_slot = (uint8_t) own->number;
-	out->own_generation = (uint8_t) gen;
-	out->map_revision = (uint32_t) special_stats.mapper_updates;
+	out->own_generation = gen;
+	/* map_revision is derived per recipient from its own mapper below. */
 
 	export_self(own, &out->self);
 	out->weapon_count = out->self.weapon_count;
@@ -210,7 +249,7 @@ server_view_export(int player_slot, unsigned int generation,
 
 		vv = &out->vehicle[vcount++];
 		vv->slot = (uint8_t) v->number;
-		vv->generation = (uint8_t) server_events_generation(
+		vv->generation = server_events_generation(
 			XTK_ENTITY_VEHICLE, (uint16_t) v->number);
 		vv->kind = (uint8_t) v->vdesc->body;
 		vv->flags = (uint8_t) (lifecycle_flags(v) & 0xFF);
@@ -246,11 +285,13 @@ server_view_export(int player_slot, unsigned int generation,
 		bv->heading = heading;
 		bv->owner_slot = (b->owner != NULL) ?
 			(uint8_t) b->owner->number : 0xFF;
+		bv->kind = (uint8_t) b->type;
+		bv->generation = server_events_generation(
+			XTK_ENTITY_BULLET, bv->id);
 		bv->owner_generation = (b->owner != NULL) ?
-			(uint8_t) server_events_generation(
+			server_events_generation(
 				XTK_ENTITY_VEHICLE,
 				(uint16_t) b->owner->number) : 0;
-		bv->kind = (uint8_t) b->type;
 	}
 
 	/* --- VISIBLE: explosions in the reference viewport ------------------ */
@@ -269,6 +310,8 @@ server_view_export(int player_slot, unsigned int generation,
 		ev->flags = 0;
 		ev->x = (double) e->x;
 		ev->y = (double) e->y;
+		ev->generation = server_events_generation(
+			XTK_ENTITY_EXPLOSION, ev->id);
 	}
 
 	/* --- MAP: the controlled player's mapper knowledge only ------------- */
@@ -277,6 +320,18 @@ server_view_export(int player_slot, unsigned int generation,
 
 		if (s->status != SP_nonexistent && s->record != NULL) {
 			Mapper *m = (Mapper *) s->record;
+			unsigned long fp = mapper_fingerprint(m);
+			int slot = (int) own->number;
+
+			if (slot >= 0 && slot < MAX_VEHICLES) {
+				if (!view_map_fp_valid[slot] ||
+				    view_map_fp[slot] != fp) {
+					view_map_rev[slot]++;
+					view_map_fp[slot] = fp;
+					view_map_fp_valid[slot] = 1;
+				}
+				out->map_revision = view_map_rev[slot];
+			}
 
 			for (x = 0; x < GRID_WIDTH; x++)
 				for (y = 0; y < GRID_HEIGHT; y++) {
@@ -327,7 +382,9 @@ server_view_export(int player_slot, unsigned int generation,
 
 			lv = &out->landmark[lcount++];
 			lv->kind = (uint8_t) b->type;
-			lv->id = (uint8_t) ((x * GRID_HEIGHT + y) & 0xFF);
+			lv->grid_x = (uint8_t) x;
+			lv->grid_y = (uint8_t) y;
+			lv->id = (uint16_t) (x * GRID_HEIGHT + y);
 			lv->x = wx;
 			lv->y = wy;
 		}
