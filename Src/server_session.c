@@ -899,7 +899,18 @@ server_session_accept(TransportPeer *peer)
 	s->index = i;
 	s->in_handshake = 1;
 	s->session_id = lobby.next_session_id++;
-	s->controller_id = lobby.next_controller_id++;
+	/*
+	 * Bounded controller identity: hand out a u32 id inside the
+	 * non-negative range and wrap back to 0 rather than overflowing into a
+	 * value that a signed int cast would turn negative.  The wrapped value
+	 * is only ever reused after 2^31 assignments and any stale owner is
+	 * rejected by the binding generation check.
+	 */
+	s->controller_id = lobby.next_controller_id;
+	if (lobby.next_controller_id >= (uint32_t) INT32_MAX)
+		lobby.next_controller_id = 0;
+	else
+		lobby.next_controller_id++;
 	s->binding = -1;
 	s->t = session_host;
 	s->peer = peer;
@@ -1018,7 +1029,7 @@ bind_humans(int *out_count)
 
 		if (!peer_active(p))
 			continue;
-		b = server_players_add(p->name, (int) p->controller_id);
+		b = server_players_add(p->name, p->controller_id);
 		if (b < 0)
 			return -1;
 		if (server_players_bind_slot(b, n) != 0)
