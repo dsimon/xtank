@@ -39,6 +39,9 @@ struct XtkFrame {
 	int      auto_lobby;
 	int      config_sent;
 	int      ready_sent;
+	uint32_t config_revision_seen;
+
+	uint64_t next_ping_ns;
 
 	int      have_epoch;
 	uint32_t epoch;
@@ -144,7 +147,26 @@ static int frame_session_message(void *user, const XtkMessage *msg)
 
 	(void)menu_apply_message(&f->lobby, &f->results, msg);
 
+	/* D3-B: a config revision change invalidates readiness; allow the
+	 * auto-lobby (solo) to ready again, but never re-send a config. */
+	if (f->lobby.config_revision != f->config_revision_seen) {
+		f->config_revision_seen = f->lobby.config_revision;
+		f->ready_sent = 0;
+	}
+
 	switch (msg->env.message_type) {
+	case XTK_MSG_LOBBY_STATE:
+		/* Server-authored session barrier: results -> lobby (reset). */
+		if (msg->body.lobby_state.session_state ==
+		    XTK_SESSION_LOBBY) {
+			if (f->running || f->results.have_results) {
+				f->running = 0;
+				menu_results_init(&f->results);
+				model_reset(f->model);
+			}
+			f->ready_sent = 0;
+		}
+		break;
 	case XTK_MSG_EPOCH_BEGIN:
 		f->have_epoch = 1;
 		f->epoch = msg->body.epoch_begin.epoch;
@@ -156,6 +178,7 @@ static int frame_session_message(void *user, const XtkMessage *msg)
 		}
 		f->last_emit_ns = f->now_ns;
 		f->running = 1;
+		f->ready_sent = 0;
 		/* Fresh epoch: no prior match state may survive (D2-E). */
 		model_reset(f->model);
 		f->stats.emitted_batches = 0;
@@ -239,6 +262,19 @@ static void frame_lobby_step(XtkFrame *f)
 	if (!f->auto_lobby || session_client_state(f->session) != XTK_SC_LOBBY) {
 		return;
 	}
+	/*
+	 * Multiplayer safety (P3.10): on a server that admits more than one
+	 * human, the client never auto-configures or auto-readies.  Doing so
+	 * while alone would let the server's solo auto-start claim the session
+	 * before the second player can join.  The shared lobby waits for the
+	 * administrator's explicit config/ready/start instead.
+	 */
+	if (session_client_human_capacity(f->session) > 1) {
+		return;
+	}
+	if (!session_client_is_admin(f->session)) {
+		return;
+	}
 	if (f->lobby.have_catalog && !f->config_sent) {
 		if (!pick_maze(&f->lobby, &maze) ||
 		    !pick_vehicle(&f->lobby, &veh)) {
@@ -246,13 +282,14 @@ static void frame_lobby_step(XtkFrame *f)
 		}
 		(void)menu_lobby_select_maze(&f->lobby, maze);
 		(void)menu_lobby_select_vehicle(&f->lobby, veh);
-		(void)session_client_send_config(f->session, maze, veh);
+		(void)session_client_send_config(f->session, maze, veh,
+						  f->lobby.selected_drone_count);
 		f->config_sent = 1;
 		return;
 	}
 	if (f->config_sent && f->lobby.have_config &&
 	    f->lobby.config_status == 0 && !f->ready_sent) {
-		(void)session_client_send_ready(f->session);
+		(void)session_client_send_ready(f->session, 1);
 		f->ready_sent = 1;
 	}
 }
@@ -370,6 +407,17 @@ int frame_tick(XtkFrame *f, uint64_t now_ns)
 		(f->stats.session_state == XTK_SC_FAILED);
 	f->stats.last_error = session_client_last_error(f->session);
 
+	/*
+	 * Lobby liveness (D3-E): a valid heartbeat keeps an idle lobby peer
+	 * from being reclaimed while both players configure/ready.  Running
+	 * input batches already refresh the server's valid-input clock.
+	 */
+	if (f->stats.session_state == XTK_SC_LOBBY &&
+	    now_ns >= f->next_ping_ns) {
+		(void)session_client_send_ping(f->session);
+		f->next_ping_ns = now_ns + 500000000ULL;
+	}
+
 	input_set_state(&f->input, map_input_state(f->stats.session_state));
 
 	frame_lobby_step(f);
@@ -427,9 +475,14 @@ void frame_set_auto_lobby(XtkFrame *f, int on)
 	}
 }
 
-int frame_lobby_select(XtkFrame *f, uint16_t maze_id, uint16_t vehicle_id)
+int frame_lobby_select_config(XtkFrame *f, uint16_t maze_id,
+			      uint16_t vehicle_id, uint8_t drones)
 {
 	if (f == NULL) {
+		return -1;
+	}
+	/* Only the server-authored administrator configures the shared lobby. */
+	if (!frame_can_config(f)) {
 		return -1;
 	}
 	if (menu_lobby_select_maze(&f->lobby, maze_id) != 0) {
@@ -438,19 +491,88 @@ int frame_lobby_select(XtkFrame *f, uint16_t maze_id, uint16_t vehicle_id)
 	if (menu_lobby_select_vehicle(&f->lobby, vehicle_id) != 0) {
 		return -1;
 	}
-	if (session_client_send_config(f->session, maze_id, vehicle_id) != 0) {
+	if (menu_lobby_select_drones(&f->lobby, drones) != 0) {
+		return -1;
+	}
+	if (session_client_send_config(f->session, maze_id, vehicle_id,
+				       drones) != 0) {
 		return -1;
 	}
 	f->config_sent = 1;
+	f->ready_sent = 0;
 	return 0;
+}
+
+int frame_lobby_select(XtkFrame *f, uint16_t maze_id, uint16_t vehicle_id)
+{
+	uint8_t drones;
+
+	if (f == NULL) {
+		return -1;
+	}
+	drones = f->lobby.selected_drone_count;
+	return frame_lobby_select_config(f, maze_id, vehicle_id, drones);
+}
+
+int frame_ready(XtkFrame *f, int ready)
+{
+	if (f == NULL || session_client_state(f->session) != XTK_SC_LOBBY) {
+		return -1;
+	}
+	if (session_client_send_ready(f->session, ready) != 0) {
+		return -1;
+	}
+	f->ready_sent = ready ? 1 : 0;
+	f->lobby.ready = ready ? 1 : 0;
+	return 0;
+}
+
+int frame_request_start(XtkFrame *f)
+{
+	if (f == NULL || !frame_can_start(f)) {
+		return -1;
+	}
+	return session_client_send_start(f->session);
 }
 
 int frame_request_reset(XtkFrame *f)
 {
-	if (f == NULL) {
+	if (f == NULL || !frame_can_reset(f)) {
 		return -1;
 	}
 	return session_client_send_reset(f->session);
+}
+
+void frame_reconnect(XtkFrame *f)
+{
+	if (f == NULL) {
+		return;
+	}
+	session_client_reconnect(f->session);
+	menu_lobby_init(&f->lobby);
+	menu_results_init(&f->results);
+	f->running = 0;
+	f->config_sent = 0;
+	f->ready_sent = 0;
+	f->config_revision_seen = 0;
+	f->have_epoch = 0;
+	f->epoch = 0;
+	model_reset(f->model);
+}
+
+int frame_can_config(const XtkFrame *f)
+{
+	return f != NULL && menu_lobby_can_config(&f->lobby);
+}
+
+int frame_can_start(const XtkFrame *f)
+{
+	return f != NULL && menu_lobby_can_start(&f->lobby);
+}
+
+int frame_can_reset(const XtkFrame *f)
+{
+	return f != NULL && menu_lobby_can_reset(&f->lobby);
 }
 
 int frame_request_quit(XtkFrame *f)
