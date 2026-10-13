@@ -1,0 +1,23 @@
+# Atomic Phase 2 protocol-v1.0 golden fixtures, frozen before the P3.3 v1.1
+# extension.  These files are RETAINED UNCHANGED (never deleted or edited); the
+# v1.1 codec supersedes them but the v1.0 bytes and their independent verifier
+# remain the backward-provenance reference.  Tests/phase3/protocol.sh re-hashes
+# every entry and requires an exact match.
+#
+# sha256                                                           path
+89f1fe41d517cf40b49ded44dce3062b251ac3f64e77d473f8c7327242f3c6aa  Tests/phase2/fixtures/protocol/catalog.hex
+ee626bb5c16afc66257f30e4823c9cbfece2305e3904b55eefc5ad67316e71b2  Tests/phase2/fixtures/protocol/cmd_ack.hex
+c5947c4542ef18d984c6d8af627f78913c2d5a4332297968474b1903d2ed5764  Tests/phase2/fixtures/protocol/config_select.hex
+d8cae1e15b87110099bf0ac4ff2ab1c1e45cb8d24c34227cf3d8c75c93e535e2  Tests/phase2/fixtures/protocol/endian.hex
+60bf0dac2edce958d2a5e5a2d45d912ba66cd29797da419dff739f95a4a8845d  Tests/phase2/fixtures/protocol/epoch_begin.hex
+8534ecca53e9989f58cd7038e93d279ee3eb3a1007f446c325e88306fa493e90  Tests/phase2/fixtures/protocol/event.hex
+b347df71c01bb246e85d876a7b82b4675257e063e6bdcd56c3a8bbf0eee92eb4  Tests/phase2/fixtures/protocol/hello.hex
+bf13145d80b94de39a3f3d07e5a5d7064f8b55c11386d692bfba8df35d21293b  Tests/phase2/fixtures/protocol/input_batch.hex
+65fef27d30f2d4d8bec5fbc18109999700a6f4c675cb008a3359110f9f383918  Tests/phase2/fixtures/protocol/protocol_error.hex
+918b2d7abf4a17dbb3c12c2e6ddbe935b50c4c241d8cb91394f3049eae055424  Tests/phase2/fixtures/protocol/reject_content.hex
+f253ddf958f20cf29b873098751cf3c44f35e70051ca224c4e663f7444792eeb  Tests/phase2/fixtures/protocol/reject_version.hex
+75c53d1571de71bb1ea38cb4867b10c26bb03b0af99b03c461010ac65f0d3718  Tests/phase2/fixtures/protocol/reliable_cmd.hex
+0f11a012afc084d9bbd061f4f368279f9ed7df04137e930d3a229cb1b8dfa59a  Tests/phase2/fixtures/protocol/results.hex
+b5f344fedfa734409326fa3337175b177810c778afbf45ce964a56a80536b4fb  Tests/phase2/fixtures/protocol/start.hex
+8b0a507c62660950c9952030138910fbeb364535acf3afb1d94c3fee6cd55b79  Tests/phase2/fixtures/protocol/view_snapshot.hex
+59928c1789d953f4b98a807090eff547788d30f854505ef7849ade65ac125ae3  Tests/phase2/fixtures/protocol/welcome.hex
