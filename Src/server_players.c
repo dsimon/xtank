@@ -65,9 +65,10 @@ server_players_init(void)
 	num_humans = 0;
 }
 
-/* Find the binding with this controller id, or -1. */
+/* Find the binding with this controller id, or -1.  Full-width u32 identity:
+ * a boundary value such as 0xFFFFFFFF is a distinct id, not a negative int. */
 static int
-find_controller(int controller)
+find_controller(uint32_t controller)
 {
 	int i;
 
@@ -91,12 +92,12 @@ find_name(const char *name)
 }
 
 int
-server_players_add(const char *name, int controller)
+server_players_add(const char *name, uint32_t controller)
 {
 	ServerHumanBinding *h;
 	int i;
 
-	if (name == NULL || name[0] == '\0' || controller < 0)
+	if (name == NULL || name[0] == '\0')
 		return -1;
 	if (num_humans >= SERVER_MAX_HUMANS)
 		return -1;
@@ -197,7 +198,7 @@ server_players_name_for_slot(int slot)
 }
 
 int
-server_players_validate(int controller, int slot, unsigned int generation)
+server_players_validate(uint32_t controller, int slot, unsigned int generation)
 {
 	int i = find_controller(controller);
 
