@@ -49,6 +49,7 @@ struct XtkFrame {
 	int32_t  newest_tick;
 	int32_t  last_emit_tick;
 	uint64_t last_emit_ns;
+	uint64_t next_emit_ns;	/* wall-clock 15 Hz input schedule */
 	double   tick_ns;
 	uint64_t now_ns;
 
@@ -163,6 +164,10 @@ static int frame_session_message(void *user, const XtkMessage *msg)
 				f->running = 0;
 				menu_results_init(&f->results);
 				model_reset(f->model);
+				/* Reset/return-to-lobby clears held edges and
+				 * the redundancy history; command ids stay
+				 * monotonic within the session. */
+				input_reset(&f->input);
 			}
 			f->ready_sent = 0;
 		}
@@ -181,7 +186,12 @@ static int frame_session_message(void *user, const XtkMessage *msg)
 		f->ready_sent = 0;
 		/* Fresh epoch: no prior match state may survive (D2-E). */
 		model_reset(f->model);
+		/* A fresh epoch discards held edges and the redundancy history
+		 * so a prior match's commands are never retransmitted. */
+		input_reset(&f->input);
+		f->next_emit_ns = f->now_ns;
 		f->stats.emitted_batches = 0;
+		f->stats.reliable_batches = 0;
 		f->stats.first_emit_tick = -1;
 		f->stats.snapshots = 0;
 		f->stats.cmd_acks = 0;
@@ -298,31 +308,57 @@ static void frame_lobby_step(XtkFrame *f)
 
 static void frame_emit(XtkFrame *f)
 {
-	XtkMessage batch;
+	XtkMessage batch, reliable;
 	int32_t etick;
-	int n;
+	int n, have_reliable = 0;
 
 	if (!f->running) {
 		return;
 	}
-	etick = f->newest_tick;
-	if (!(etick >= 1 && etick > f->last_emit_tick)) {
-		/* Heartbeat fallback if snapshots stall (keeps the 2 s solo
-		 * abort from firing on an idle-but-connected client). */
-		if (f->newest_tick > 0 && f->now_ns >= f->last_emit_ns +
-		    (uint64_t)(f->tick_ns * 3.0)) {
-			etick = f->last_emit_tick + 1;
-			if (etick < 1) {
-				etick = 1;
-			}
-		} else {
-			return;
+
+	/*
+	 * Input and heartbeat refresh on an independent 15 Hz wall-clock
+	 * schedule, not on snapshot arrival or render FPS.  A snapshot stall
+	 * therefore never starves the server's valid-input clock; the tick used
+	 * is only a freshness hint and never reserves a future engine tick.
+	 */
+	if (f->now_ns < f->next_emit_ns) {
+		return;
+	}
+
+	/*
+	 * Stamp the controlled entity-life generation observed from the
+	 * authorized views.  A life change discards any edge latched in the
+	 * previous life, so a stale edge cannot fire after respawn/reset.
+	 */
+	{
+		uint32_t gen = 0;
+		if (model_have_own_pose(f->model, NULL, NULL, NULL, &gen)) {
+			input_set_life_generation(&f->input, gen);
 		}
 	}
-	n = input_emit(&f->input, etick, f->epoch,
-		       session_client_id(f->session), &batch);
+
+	etick = f->newest_tick;
+	if (etick < f->last_emit_tick + 1) {
+		etick = f->last_emit_tick + 1;
+	}
+	if (etick < f->start_tick) {
+		etick = f->start_tick;
+	}
+	if (etick < 1) {
+		etick = 1;
+	}
+
+	n = input_emit_reliable(&f->input, etick, f->epoch,
+				session_client_id(f->session), &batch,
+				&reliable, &have_reliable);
 	if (n > 0) {
 		(void)session_client_send_input(f->session, &batch);
+		if (have_reliable) {
+			(void)session_client_send_input_reliable(f->session,
+								 &reliable);
+			f->stats.reliable_batches++;
+		}
 		if (f->stats.emitted_batches == 0) {
 			f->stats.first_emit_tick = etick;
 		}
@@ -330,6 +366,7 @@ static void frame_emit(XtkFrame *f)
 	}
 	f->last_emit_tick = etick;
 	f->last_emit_ns = f->now_ns;
+	f->next_emit_ns = f->now_ns + (uint64_t)f->tick_ns;
 }
 
 /* ---- render ---------------------------------------------------------- */
