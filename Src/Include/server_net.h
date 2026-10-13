@@ -72,6 +72,18 @@
 
 typedef struct ServerNetSession ServerNetSession;
 
+/*
+ * P3.9 receive/router callback.  server_net_drain() decodes each received
+ * datagram and hands it, with the transport peer it arrived on and its actual
+ * channel, to this handler.  The session coordinator registers a handler that
+ * dispatches every message type; the admission-only pre-step passes NULL and
+ * uses the internal command admission path.  This keeps transport_service()
+ * and transport_receive() single-owner (this translation unit).
+ */
+typedef void (*ServerNetRxFn)(void *ctx, TransportPeer *peer,
+			      const XtkMessage *msg, uint8_t channel,
+			      int assign_tick);
+
 typedef struct {
 	unsigned long packets_rx;
 	unsigned long packets_tx;
@@ -94,6 +106,8 @@ typedef struct {
 	unsigned long sessions_aborted;
 	unsigned long service_events;
 	unsigned long service_max_events;
+	/* P3.9 largest number of datagrams decoded in one tick (<=64). */
+	unsigned long drain_max_per_tick;
 } ServerNetStats;
 
 /* Clear all admission state; safe to call repeatedly. */
@@ -183,6 +197,23 @@ int server_net_rotation(void);
  * global service budget without starving the other.
  */
 int server_net_session_allow_event(ServerNetSession *s);
+
+/*
+ * P3.9 single transport owner.  server_net_service() is the only caller of
+ * transport_service() in the tree; server_net_drain() is the only caller of
+ * transport_receive().  Both are nonblocking and account the aggregate
+ * transport work for `assign_tick` against XTK_MAX_SERVICE_WORK_PER_TICK (64
+ * events) even when called more than once per tick, so the frozen bound holds
+ * across two peers, reconnects and maximum snapshots.
+ *
+ * server_net_service() services the transport and returns the number of events
+ * processed (0 when the host is absent or already saturated for this tick).
+ * server_net_drain() decodes and routes at most SERVER_NET_SERVICE_BUDGET
+ * received datagrams through `fn` (or the internal INPUT_BATCH/RELIABLE_CMD
+ * admission when `fn` is NULL) and returns the number drained.
+ */
+int server_net_service(int assign_tick);
+int server_net_drain(int assign_tick, ServerNetRxFn fn, void *ctx);
 
 /*
  * Bounded pre-step admission point: service each session's transport within a
