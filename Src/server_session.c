@@ -72,6 +72,13 @@ extern Vehicle *dead_vehicles[];
 #define SERVER_SESSION_STEP_BUDGET	XTK_MAX_SERVICE_WORK_PER_TICK
 
 /*
+ * P3.9: consecutive unsuccessful snapshot sends tolerated before the peer is
+ * treated as irrecoverably saturated and departed (2 s at 15 Hz).  Only one
+ * unsent snapshot is ever retained, so this bounds the retry, not the queue.
+ */
+#define SERVER_SESSION_SNAP_FAIL_MAX	30
+
+/*
  * Per-peer record.  Everything that is not shared world state lives here; the
  * shared coordinator below owns the one world, epoch, config and administrator.
  */
@@ -104,6 +111,17 @@ struct ServerSession {
 	int rx_events;
 
 	uint32_t snapshot_seq;
+
+	/*
+	 * P3.9 at most one unsent snapshot is retained per peer.  A transient
+	 * unreliable send failure keeps the newest snapshot (replacing any
+	 * older retained one) instead of growing a backlog; the peer departs
+	 * only after a bounded run of consecutive failures so a genuinely dead
+	 * peer is still reclaimed.
+	 */
+	int have_pending_snap;
+	int snap_fail_streak;
+	XtkMessage pending_snap;
 
 	/*
 	 * P3.8 per-recipient event delivery cursors.  `ev_cursor` is the next
@@ -348,7 +366,13 @@ server_session_bound_slot(const ServerSession *s)
 uint32_t
 server_session_snapshot_seq(const ServerSession *s)
 {
-	return (s != (const ServerSession *) NULL) ? s->snapshot_seq : 0;
+	return (s != (ServerSession *) NULL) ? s->snapshot_seq : 0;
+}
+
+int
+server_session_pending_snapshot(const ServerSession *s)
+{
+	return (s != (const ServerSession *) NULL) ? s->have_pending_snap : 0;
 }
 
 int
@@ -1400,22 +1424,54 @@ session_deliver(ServerSession *p)
 
 	if (p->bound_slot >= 0) {
 		static XtkViewSnapshot snap;
-		uint16_t flags = (p->snapshot_seq == 0) ? XTK_FLAG_KEYFRAME : 0;
 
-		if (server_view_export(p->bound_slot, 0, p->snapshot_seq, flags,
-				       &snap) == SERVER_VIEW_OK) {
-			session_envelope(p, &m, XTK_MSG_VIEW_SNAPSHOT, frame);
-			m.env.epoch = lobby.epoch;
-			m.body.view_snapshot = snap;
-			m.body.view_snapshot.snapshot_sequence = p->snapshot_seq;
-			m.body.view_snapshot.server_tick = (uint32_t) frame;
-			m.body.view_snapshot.flags = flags;
-			if (session_emit(p, &m) == 0) {
-				/* A send failure is never marked delivered. */
-				server_session_depart(p, XTK_ERR_QUEUE_SATURATED);
-				return;
+		/*
+		 * P3.9: retry the one retained snapshot first.  Only the newest
+		 * unsent snapshot is ever kept, so a transient unreliable send
+		 * failure cannot grow an application backlog; a fresh snapshot
+		 * replaces any older retained one, and a bounded run of failures
+		 * reclaims a genuinely dead peer.
+		 */
+		if (p->have_pending_snap) {
+			if (session_emit(p, &p->pending_snap) == 0) {
+				if (++p->snap_fail_streak >=
+				    SERVER_SESSION_SNAP_FAIL_MAX) {
+					server_session_depart(
+						p, XTK_ERR_QUEUE_SATURATED);
+					return;
+				}
+			} else {
+				p->have_pending_snap = 0;
+				p->snap_fail_streak = 0;
+				p->snapshot_seq++;
 			}
-			p->snapshot_seq++;
+		}
+
+		if (!p->have_pending_snap) {
+			uint16_t flags = (p->snapshot_seq == 0) ?
+					 XTK_FLAG_KEYFRAME : 0;
+
+			if (server_view_export(p->bound_slot, 0,
+					       p->snapshot_seq, flags,
+					       &snap) == SERVER_VIEW_OK) {
+				session_envelope(p, &m, XTK_MSG_VIEW_SNAPSHOT,
+						 frame);
+				m.env.epoch = lobby.epoch;
+				m.body.view_snapshot = snap;
+				m.body.view_snapshot.snapshot_sequence =
+					p->snapshot_seq;
+				m.body.view_snapshot.server_tick =
+					(uint32_t) frame;
+				m.body.view_snapshot.flags = flags;
+				if (session_emit(p, &m) == 0) {
+					/* Retain the newest unsent snapshot. */
+					p->pending_snap = m;
+					p->have_pending_snap = 1;
+					p->snap_fail_streak = 1;
+				} else {
+					p->snapshot_seq++;
+				}
+			}
 		}
 	}
 
@@ -1563,6 +1619,34 @@ server_session_return_to_lobby(ServerSession *s)
 /* Bounded service and listen loop                                     */
 /* ------------------------------------------------------------------ */
 
+/*
+ * P3.9 receive handler.  server_net_drain() has already decoded the datagram;
+ * this maps the transport peer to its coordinator record, applies the D3-E
+ * per-peer per-tick event quota (so one flooding peer cannot consume the whole
+ * tick), and dispatches the protocol message.  `ctx` is the service timestamp.
+ */
+static void
+session_rx(void *ctx, TransportPeer *peer, const XtkMessage *msg,
+	   uint8_t channel, int assign_tick)
+{
+	uint64_t t = *(uint64_t *) ctx;
+	ServerSession *s;
+
+	if (msg == (const XtkMessage *) NULL)
+		return;
+	s = session_for_peer(peer);
+	if (s == (ServerSession *) NULL || s->disconnected)
+		return;
+	if (s->rx_tick != assign_tick) {
+		s->rx_tick = assign_tick;
+		s->rx_events = 0;
+	}
+	if (s->rx_events >= SERVER_NET_PEER_EVENT_QUOTA)
+		return;
+	s->rx_events++;
+	(void) server_session_message_ch(s, msg, channel, t);
+}
+
 int
 server_session_service(uint64_t t)
 {
@@ -1580,10 +1664,9 @@ server_session_service(uint64_t t)
 	 * direct-drive fixture exercises the real service path.
 	 */
 	if (host != (Transport *) NULL) {
-		events = transport_service(host,
-					   (int) SERVER_SESSION_STEP_BUDGET);
-		if (events < 0)
-			events = 0;
+		/* P3.9 single owner: service and route through the shared
+		 * admission layer, never transport_service()/receive() here. */
+		events = server_net_service(frame + 1);
 
 		while (transport_poll_connect(host, &p)) {
 			if (lobby.state != SERVER_SESSION_LOBBY ||
@@ -1601,41 +1684,7 @@ server_session_service(uint64_t t)
 				server_session_depart(s, XTK_ERR_TIMEOUT);
 		}
 
-		{
-			int served = 0;
-			int budget = (int) SERVER_NET_SERVICE_BUDGET;
-
-			while (served < budget) {
-				uint8_t buf[TRANSPORT_MAX_PACKET];
-				size_t len = 0;
-				uint8_t ch = 0;
-				XtkMessage msg;
-				int r = transport_receive(host, &p, buf,
-							  sizeof(buf), &len,
-							  &ch);
-
-				if (r <= 0)
-					break;
-				served++;
-				s = session_for_peer(p);
-				if (s == (ServerSession *) NULL)
-					continue;
-				/* Bound one flooding peer's share of this
-				 * tick; the healthy peer is still serviced. */
-				if (s->rx_tick != frame + 1) {
-					s->rx_tick = frame + 1;
-					s->rx_events = 0;
-				}
-				if (s->rx_events >=
-				    SERVER_NET_PEER_EVENT_QUOTA)
-					continue;
-				s->rx_events++;
-				if (xtk_decode(buf, len, &msg) != XTK_ERR_NONE)
-					continue;
-				(void) server_session_message_ch(s, &msg, ch,
-								 t);
-			}
-		}
+		(void) server_net_drain(frame + 1, session_rx, &t);
 	}
 
 	/*
