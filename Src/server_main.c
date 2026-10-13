@@ -128,7 +128,7 @@ server_usage(const char *prog)
 	printf("  --matches N        matches to play/reset (default 1)\n");
 	printf("  --max-ticks N      bound each match to N ticks (0 = unlimited)\n");
 	printf("  --assets DIR       explicit asset root\n");
-	printf("  --listen PORT      run the P2.8 network-server lobby/session\n");
+	printf("  --listen PORT      run the P3.4 two-human lobby/match server\n");
 	printf("  --fast             bypass wall-clock pacing (replay)\n");
 	printf("  --version          print version and exit\n");
 	printf("  --help             this message\n");
