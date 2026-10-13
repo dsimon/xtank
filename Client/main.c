@@ -1073,7 +1073,8 @@ static void deliver_platform_input(XtkFrame *fr, ClientPlatform *p)
 	}
 }
 
-static void run_play(const char *spec, const char *assets_path)
+static void run_play(const char *spec, const char *assets_path,
+		     const char *name)
 {
 	char host[256];
 	int port = 0;
@@ -1087,6 +1088,7 @@ static void run_play(const char *spec, const char *assets_path)
 	ClientEvents ev;
 	XtkFrameStats st;
 	uint64_t last_log = 0;
+	int reconnects = 0;
 	int i;
 
 	colon = strrchr(spec, ':');
@@ -1121,7 +1123,8 @@ static void run_play(const char *spec, const char *assets_path)
 
 	sc = session_client_create();
 	if (sc == NULL ||
-	    session_client_connect(sc, host, (uint16_t)port, "pilot") != 0) {
+	    session_client_connect(sc, host, (uint16_t)port,
+				   name != NULL ? name : "pilot") != 0) {
 		printf("PLAY FAIL (cannot connect to %s:%d)\n", host, port);
 		SDL_DestroySurface(surf);
 		client_platform_destroy(p);
@@ -1152,7 +1155,23 @@ static void run_play(const char *spec, const char *assets_path)
 		client_platform_present(p, surf);
 
 		frame_stats(fr, &st);
-		if (st.session_state == XTK_SC_FAILED) {
+		if (st.session_state == XTK_SC_FAILED ||
+		    st.session_state == XTK_SC_DISCONNECTED) {
+			/* Rejoin a fresh lobby in-process (no restart). */
+			if (reconnects < 5) {
+				printf("PLAY reconnecting (state=%d 0x%04x %s)\n",
+				       (int)st.session_state,
+				       (unsigned)st.last_error,
+				       session_client_error_text(sc));
+				frame_reconnect(fr);
+				if (session_client_connect(sc, host,
+					(uint16_t)port,
+					name != NULL ? name : "pilot") == 0) {
+					reconnects++;
+					client_platform_delay(100);
+					continue;
+				}
+			}
 			printf("PLAY FAIL (0x%04x %s)\n",
 			       (unsigned)st.last_error,
 			       session_client_error_text(sc));
@@ -1193,8 +1212,8 @@ static void run_play(const char *spec, const char *assets_path)
 static void usage(const char *argv0)
 {
 	printf("usage: %s [--self-test] [--frames N] [--connect HOST:PORT]\n"
-	       "          [--play HOST:PORT] [--assets FILE] [--fixtures DIR]\n"
-	       "          [--logical WxH] [--ui-demo DIR]\n",
+	       "          [--play HOST:PORT] [--name NAME] [--assets FILE]\n"
+	       "          [--fixtures DIR] [--logical WxH] [--ui-demo DIR]\n",
 	       argv0);
 }
 
@@ -1208,6 +1227,7 @@ int main(int argc, char **argv)
 	const char *play_spec = NULL;
 	const char *assets_path = NULL;
 	const char *ui_demo_dir = NULL;
+	const char *player_name = NULL;
 	int i;
 
 	for (i = 1; i < argc; ++i) {
@@ -1219,6 +1239,8 @@ int main(int argc, char **argv)
 			connect_spec = argv[++i];
 		} else if (strcmp(argv[i], "--play") == 0 && i + 1 < argc) {
 			play_spec = argv[++i];
+		} else if (strcmp(argv[i], "--name") == 0 && i + 1 < argc) {
+			player_name = argv[++i];
 		} else if (strcmp(argv[i], "--assets") == 0 && i + 1 < argc) {
 			assets_path = argv[++i];
 		} else if (strcmp(argv[i], "--fixtures") == 0 && i + 1 < argc) {
@@ -1248,7 +1270,7 @@ int main(int argc, char **argv)
 	}
 
 	if (play_spec != NULL) {
-		run_play(play_spec, assets_path);
+		run_play(play_spec, assets_path, player_name);
 		return 0;
 	}
 
