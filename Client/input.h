@@ -89,6 +89,15 @@ typedef struct {
 	/* Latched one-shot presses not yet emitted (edge controls). */
 	uint8_t       edge[XTK_CTL_COUNT];
 
+	/*
+	 * Controlled entity-life generation (0 = not yet known).  Every emitted
+	 * command is stamped with it so the server can reject a delayed edge
+	 * from a previous life even inside the expiry window; on a change to a
+	 * new known life the latched one-shot edges and the redundancy history
+	 * are discarded so no stale edge can fire under the new life.
+	 */
+	uint32_t      life_generation;
+
 	/* World aim (world coordinates; already camera/DPI transformed). */
 	int           aim_valid;
 	double        aim_x, aim_y;
@@ -130,6 +139,16 @@ int  input_focused(const XtkInputController *ic);
  */
 void input_control_event(XtkInputController *ic, XtkControl ctl, int down);
 
+/*
+ * Set the controlled entity-life generation observed from the authorized
+ * views.  `generation` 0 means "not yet known" and leaves the controller
+ * unchanged; a change to a different known life discards the latched one-shot
+ * edges and the redundancy history so an edge produced in the previous life
+ * can never be replayed under the new one.  Command ids stay monotonic.
+ */
+void input_set_life_generation(XtkInputController *ic, uint32_t generation);
+uint32_t input_life_generation(const XtkInputController *ic);
+
 /* Set the current world aim point (camera/DPI transform already applied). */
 void input_aim_world(XtkInputController *ic, double world_x, double world_y);
 
@@ -155,5 +174,19 @@ int input_quit_requested(const XtkInputController *ic);
  */
 int input_emit(XtkInputController *ic, int32_t server_tick, uint32_t epoch,
 	       uint32_t session_id, XtkMessage *out);
+
+/*
+ * As input_emit(), but also produces the reliable companion (channel 0) for
+ * one-shot edges and held releases.  The companion carries the SAME command
+ * ids as the redundant INPUT_BATCH copies, so a datagram loss is recovered
+ * reliably while the server's shared command-id dedup applies each at most
+ * once.  `reliable_out` is fully initialised; when there is anything to send
+ * reliably `*have_reliable` is set to 1, else 0.  `reliable_out` and
+ * `have_reliable` may both be NULL (equivalent to input_emit()).
+ */
+int input_emit_reliable(XtkInputController *ic, int32_t server_tick,
+			uint32_t epoch, uint32_t session_id,
+			XtkMessage *batch_out, XtkMessage *reliable_out,
+			int *have_reliable);
 
 #endif /* XTK_CLIENT_INPUT_H */
