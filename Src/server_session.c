@@ -104,7 +104,15 @@ struct ServerSession {
 	int rx_events;
 
 	uint32_t snapshot_seq;
-	int events_sent;
+
+	/*
+	 * P3.8 per-recipient event delivery cursors.  `ev_cursor` is the next
+	 * capture ordinal this recipient will consider; `ev_seq` is the
+	 * recipient-local delivered sequence (contiguous, from 0).  A private
+	 * filtered event advances neither.
+	 */
+	uint32_t ev_cursor;
+	uint32_t ev_seq;
 
 	/* bounded encoded control-reply log (inspection/tests) */
 	int reply_count;
@@ -346,7 +354,8 @@ server_session_snapshot_seq(const ServerSession *s)
 int
 server_session_events_sent(const ServerSession *s)
 {
-	return (s != (const ServerSession *) NULL) ? s->events_sent : 0;
+	/* Recipient-local delivered event count for the current epoch. */
+	return (s != (const ServerSession *) NULL) ? (int) s->ev_seq : 0;
 }
 
 int
@@ -377,7 +386,14 @@ server_session_set_admin(ServerSession *s, int admin)
 /* Outbound messages                                                   */
 /* ------------------------------------------------------------------ */
 
-/* Encode, send (when attached) and log a message in the peer reply ring. */
+/*
+ * Encode, send (when attached) and log a message in the peer reply ring.
+ *
+ * Returns the encoded length on success or 0 on failure.  A transport send
+ * failure returns 0 and is NOT logged, so a caller that gates delivery on the
+ * return value (P3.8 events/snapshots) never marks an unsent message delivered
+ * (docs/EVENT-VIEW-AUTHZ-v1.md section 5).
+ */
 static size_t
 session_emit(ServerSession *s, const XtkMessage *m)
 {
@@ -386,10 +402,12 @@ session_emit(ServerSession *s, const XtkMessage *m)
 
 	if (e != XTK_ERR_NONE)
 		return 0;
-	if (s->t != (Transport *) NULL && s->peer != (TransportPeer *) NULL)
-		(void) transport_send(s->t, s->peer,
-				      xtk_next_channel(m->env.message_type),
-				      txbuf, len);
+	if (s->t != (Transport *) NULL && s->peer != (TransportPeer *) NULL) {
+		if (transport_send(s->t, s->peer,
+				   xtk_next_channel(m->env.message_type),
+				   txbuf, len) != 0)
+			return 0;
+	}
 	if (len <= SERVER_SESSION_REPLY_BYTES &&
 	    s->reply_count < SERVER_SESSION_REPLY_MAX) {
 		int i = s->reply_count++;
@@ -769,7 +787,8 @@ shared_clear_match(void)
 		p->bound_slot = -1;
 		p->generation = 0;
 		p->snapshot_seq = 0;
-		p->events_sent = 0;
+		p->ev_cursor = 0;
+		p->ev_seq = 0;
 		p->ready = 0;
 	}
 	lobby.epoch_live = 0;
@@ -1283,7 +1302,8 @@ server_session_begin(ServerSession *s, uint32_t start_tick, uint64_t t)
 		p->bound_slot = -1;
 		p->generation = 0;
 		p->snapshot_seq = 0;
-		p->events_sent = 0;
+		p->ev_cursor = 0;
+		p->ev_seq = 0;
 		p->ready = 0;
 	}
 
@@ -1352,6 +1372,27 @@ server_session_begin(ServerSession *s, uint32_t start_tick, uint64_t t)
 	return SERVER_SESSION_OK;
 }
 
+/*
+ * The recipient's authorized camera: the controlled vehicle's current Loc (the
+ * frozen last Loc when dead).  No caller supplies a camera; this is derived
+ * only from the peer's own bound slot (docs/EVENT-VIEW-AUTHZ-v1.md section 2).
+ */
+static void
+peer_camera(const ServerSession *p, int *slot, double *x, double *y)
+{
+	*slot = p->bound_slot;
+	*x = 0.0;
+	*y = 0.0;
+	if (p->bound_slot >= 0 && p->bound_slot < num_combatants) {
+		Vehicle *v = combatant[p->bound_slot].vehicle;
+
+		if (v != (Vehicle *) NULL && v->loc != (Loc *) NULL) {
+			*x = (double) v->loc->x;
+			*y = (double) v->loc->y;
+		}
+	}
+}
+
 static void
 session_deliver(ServerSession *p)
 {
@@ -1369,27 +1410,60 @@ session_deliver(ServerSession *p)
 			m.body.view_snapshot.snapshot_sequence = p->snapshot_seq;
 			m.body.view_snapshot.server_tick = (uint32_t) frame;
 			m.body.view_snapshot.flags = flags;
-			(void) session_emit(p, &m);
+			if (session_emit(p, &m) == 0) {
+				/* A send failure is never marked delivered. */
+				server_session_depart(p, XTK_ERR_QUEUE_SATURATED);
+				return;
+			}
 			p->snapshot_seq++;
 		}
 	}
 
+	/*
+	 * Per-recipient authorized event stream, bounded by capture ordinals.
+	 * The recipient reads every retained ordinal in order; an unauthorized
+	 * (private) event is skipped WITHOUT consuming a recipient-local
+	 * sequence number, so a filtered gap is never interpreted as loss.  A
+	 * cursor below the oldest retained ordinal means retirement outran this
+	 * recipient: fail it explicitly, never silently drop.
+	 */
 	{
-		int n = server_events_count();
-		int i;
+		uint32_t first = server_events_first_ordinal();
+		uint32_t next = server_events_next_ordinal();
+		uint32_t o;
+		int slot;
+		double cx, cy;
 
-		for (i = p->events_sent; i < n; i++) {
-			const XtkEvent *e = server_events_event(i);
+		peer_camera(p, &slot, &cx, &cy);
 
-			if (e == (const XtkEvent *) NULL)
+		if (p->ev_cursor < first || p->ev_cursor > next) {
+			server_session_depart(p, XTK_ERR_QUEUE_SATURATED);
+			return;
+		}
+		for (o = p->ev_cursor; o < next; o++) {
+			const XtkEvent *e;
+
+			if (!server_events_authorized(o, slot, cx, cy))
 				continue;
+			e = server_events_event_at(o);
+			if (e == (const XtkEvent *) NULL) {
+				server_session_depart(p,
+						      XTK_ERR_QUEUE_SATURATED);
+				return;
+			}
 			session_envelope(p, &m, XTK_MSG_EVENT, frame);
 			m.env.epoch = lobby.epoch;
 			m.body.event = *e;
-			(void) session_emit(p, &m);
+			m.body.event.event_sequence = p->ev_seq;
+			if (session_emit(p, &m) == 0) {
+				server_session_depart(p,
+						      XTK_ERR_QUEUE_SATURATED);
+				return;
+			}
+			p->ev_seq++;
+			p->ev_cursor = o + 1;
 		}
-		if (n > p->events_sent)
-			p->events_sent = n;
+		p->ev_cursor = next;
 	}
 }
 
