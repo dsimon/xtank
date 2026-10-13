@@ -25,7 +25,7 @@
 /* Presentation-side lobby state (never authoritative). */
 typedef struct {
 	int      connected;		/* WELCOME received                 */
-	int      is_admin;		/* player role / first peer (D2-F)  */
+	int      is_admin;		/* LOBBY_STATE admin_index == self  */
 	int      have_catalog;
 	char     maze[XTK_MAX_CATALOG_ENTRIES][XTK_MAX_NAME_BYTES + 1];
 	uint16_t maze_id[XTK_MAX_CATALOG_ENTRIES];
@@ -35,9 +35,21 @@ typedef struct {
 	int      num_vehicles;
 	uint16_t selected_maze_id;
 	uint16_t selected_vehicle_id;
+	uint8_t  selected_drone_count;
 	int      have_config;
 	uint16_t config_status;		/* 0 accepted                       */
 	uint16_t config_error;
+
+	/* Server-authored LOBBY_STATE (P3.10). */
+	int      have_lobby_state;
+	uint8_t  self_index;
+	uint8_t  admin_index;
+	uint8_t  drone_count;
+	uint8_t  session_state;		/* XTK_SESSION_*                    */
+	uint32_t config_revision;
+	int      roster_count;
+	XtkRosterEntry roster[XTK_LOBBY_ROSTER_MAX];
+
 	int      ready;
 	int      have_error;
 	uint16_t last_error;
@@ -64,6 +76,16 @@ int menu_apply_message(XtkLobbyState *ls, XtkResultsState *rs,
 /* Selection helpers (validated only against the received catalog). */
 int menu_lobby_select_maze(XtkLobbyState *ls, uint16_t maze_id);
 int menu_lobby_select_vehicle(XtkLobbyState *ls, uint16_t vehicle_id);
+int menu_lobby_select_drones(XtkLobbyState *ls, uint8_t drone_count);
+
+/*
+ * Control enablement (presentation gates only; the server is authoritative).
+ * Config/start require the server-authored administrator and the Lobby state;
+ * reset requires the administrator and a live/results epoch.
+ */
+int menu_lobby_can_config(const XtkLobbyState *ls);
+int menu_lobby_can_start(const XtkLobbyState *ls);
+int menu_lobby_can_reset(const XtkLobbyState *ls);
 
 /* Catalog name lookup by stable content id; NULL when absent. */
 const char *menu_lobby_maze_name(const XtkLobbyState *ls, uint16_t maze_id);
