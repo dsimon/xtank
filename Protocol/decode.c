@@ -79,10 +79,13 @@ uint8_t xtk_next_channel(uint8_t message_type)
     case XTK_MSG_RESULTS:
     case XTK_MSG_RESET:
     case XTK_MSG_QUIT:
+    case XTK_MSG_LOBBY_STATE:
+    case XTK_MSG_START_REQUEST:
     case XTK_MSG_EVENT:
     case XTK_MSG_CMD_ACK:
     case XTK_MSG_PROTOCOL_ERROR:
     case XTK_MSG_RELIABLE_CMD:
+    case XTK_MSG_VIEW_KEYFRAME:
         return XTK_CH_CONTROL;
     case XTK_MSG_VIEW_SNAPSHOT:
         return XTK_CH_SNAPSHOT;
@@ -216,6 +219,27 @@ static void r_count(R *r, uint32_t count, uint32_t max)
     }
 }
 
+/* Consume n reserved octets; any non-zero value is XTK_ERR_MALFORMED.  This
+ * makes the "reserved fields must be zero" rule a decode-time invariant
+ * rather than an encoder-only convention. */
+static void r_rsv(R *r, size_t n)
+{
+    size_t i;
+    if (r->err != XTK_ERR_NONE) {
+        return;
+    }
+    if (!r_room(r, n)) {
+        return;
+    }
+    for (i = 0; i < n; ++i) {
+        if (r->buf[r->off + i] != 0) {
+            r->err = XTK_ERR_MALFORMED;
+            return;
+        }
+    }
+    r->off += n;
+}
+
 /* ---- envelope -------------------------------------------------------- */
 
 static int dec_envelope(const uint8_t *buf, size_t len, XtkEnvelope *e,
@@ -293,7 +317,9 @@ static void dec_welcome(R *r, XtkWelcome *m)
     m->role = r_u8(r);
     m->tick_hz = r_u8(r);
     m->max_players = r_u8(r);
-    m->reserved = r_u8(r);
+    m->human_capacity = r_u8(r);
+    r_rsv(r, 1);
+    m->reserved = 0;
 }
 
 static void dec_reject(R *r, XtkReject *m)
@@ -321,23 +347,78 @@ static void dec_config_select(R *r, XtkConfigSelect *m)
 {
     m->maze_id = r_u16(r);
     m->vehicle_id = r_u16(r);
-    m->reserved = r_u32(r);
+    m->drone_count = r_u8(r);
+    r_rsv(r, 7);   /* reserved (1) + reserved2 (2) + reserved3 (4) */
+    m->reserved = m->reserved2 = m->reserved3 = 0;
 }
 
 static void dec_config_status(R *r, XtkConfigStatus *m)
 {
     m->maze_id = r_u16(r);
     m->vehicle_id = r_u16(r);
+    m->drone_count = r_u8(r);
+    r_rsv(r, 1);
     m->status = r_u16(r);
     m->error_code = r_u16(r);
+    r_rsv(r, 2);
+    m->config_revision = r_u32(r);
+    m->reserved = m->reserved2 = 0;
+}
+
+static void dec_ready(R *r, XtkReady *m)
+{
+    m->ready = r_u8(r);
+    r_rsv(r, 3);   /* reserved (1) + reserved2 (2) */
+    m->config_revision = r_u32(r);
+    m->reserved = m->reserved2 = 0;
 }
 
 static void dec_start(R *r, XtkStart *m)
 {
     m->start_tick = r_u32(r);
     m->maze_id = r_u16(r);
-    m->vehicle_id = r_u8(r);
-    m->reserved = r_u8(r);
+    m->vehicle_id = r_u16(r);
+    m->drone_count = r_u8(r);
+    r_rsv(r, 3);   /* reserved (1) + reserved2 (2) */
+    m->config_revision = r_u32(r);
+    m->reserved = m->reserved2 = 0;
+}
+
+static void dec_start_request(R *r, XtkStartRequest *m)
+{
+    m->expected_config_revision = r_u32(r);
+    r_rsv(r, 4);
+    m->reserved = 0;
+}
+
+static void dec_roster_entry(R *r, XtkRosterEntry *e)
+{
+    e->connection_id = r_u32(r);
+    e->controller_id = r_u32(r);
+    e->slot = r_u8(r);
+    e->ready = r_u8(r);
+    e->flags = r_u8(r);
+    e->departure_reason = r_u8(r);
+    r_str(r, e->name, XTK_MAX_NAME_BYTES);
+}
+
+static void dec_lobby_state(R *r, XtkLobbyStatus *m)
+{
+    uint8_t i;
+    m->config_revision = r_u32(r);
+    m->session_state = r_u8(r);
+    m->drone_count = r_u8(r);
+    m->maze_id = r_u16(r);
+    m->vehicle_id = r_u16(r);
+    m->self_index = r_u8(r);
+    m->admin_index = r_u8(r);
+    m->human_count = r_u8(r);
+    r_rsv(r, 3);   /* reserved (1) + reserved2 (2) */
+    m->reserved = m->reserved2 = 0;
+    r_count(r, m->human_count, XTK_LOBBY_ROSTER_MAX);
+    for (i = 0; i < m->human_count && r->err == XTK_ERR_NONE; ++i) {
+        dec_roster_entry(r, &m->entry[i]);
+    }
 }
 
 static void dec_epoch_begin(R *r, XtkEpochBegin *m)
@@ -353,12 +434,15 @@ static void dec_results(R *r, XtkResults *m)
     m->result_kind = r_u8(r);
     m->winner_slot = r_u8(r);
     m->vehicle_count = r_u8(r);
-    m->reserved = r_u8(r);
+    r_rsv(r, 1);
+    m->reserved = 0;
     r_count(r, m->vehicle_count, XTK_MAX_PLAYERS);
     for (i = 0; i < m->vehicle_count && r->err == XTK_ERR_NONE; ++i) {
         m->entry[i].slot = r_u8(r);
-        m->entry[i].generation = r_u8(r);
-        m->entry[i].reserved = r_u16(r);
+        m->entry[i].flags = r_u8(r);
+        r_rsv(r, 2);
+        m->entry[i].reserved = 0;
+        m->entry[i].generation = r_u32(r);
         m->entry[i].score = r_u32(r);
         r_str(r, m->entry[i].name, XTK_MAX_NAME_BYTES);
     }
@@ -367,12 +451,14 @@ static void dec_results(R *r, XtkResults *m)
 static void dec_reset(R *r, XtkReset *m)
 {
     m->prior_epoch = r_u32(r);
-    m->reserved = r_u32(r);
+    r_rsv(r, 4);
+    m->reserved = 0;
 }
 
 static void dec_event(R *r, XtkEvent *m)
 {
     m->event_sequence = r_u32(r);
+    m->capture_tick = r_u32(r);
     m->event_type = r_u8(r);
     m->entity_kind = r_u8(r);
     m->entity_id = r_u16(r);
@@ -386,14 +472,16 @@ static void dec_cmd_ack(R *r, XtkCmdAck *m)
 {
     uint16_t i;
     m->count = r_u16(r);
-    m->reserved = r_u16(r);
+    r_rsv(r, 2);
+    m->reserved = 0;
     r_count(r, m->count, XTK_ACK_MAX_ENTRIES);
     for (i = 0; i < m->count && r->err == XTK_ERR_NONE; ++i) {
         m->entry[i].command_id = r_u32(r);
         m->entry[i].assigned_tick = r_u32(r);
         m->entry[i].status = r_u8(r);
         m->entry[i].reason = r_u8(r);
-        m->entry[i].reserved = r_u16(r);
+        r_rsv(r, 2);
+        m->entry[i].reserved = 0;
     }
 }
 
@@ -403,7 +491,8 @@ static void dec_protocol_error(R *r, XtkProtocolError *m)
     m->detail = r_u16(r);
     m->offending_sequence = r_u32(r);
     m->offending_type = r_u16(r);
-    m->reserved = r_u16(r);
+    r_rsv(r, 2);
+    m->reserved = 0;
 }
 
 static void dec_commands(R *r, XtkCommand *c, uint16_t n)
@@ -412,9 +501,11 @@ static void dec_commands(R *r, XtkCommand *c, uint16_t n)
     for (i = 0; i < n && r->err == XTK_ERR_NONE; ++i) {
         c[i].command_id = r_u32(r);
         c[i].tick_hint = r_u32(r);
+        c[i].life_generation = r_u32(r);
         c[i].op = r_u8(r);
         c[i].flags = r_u8(r);
-        c[i].reserved = r_u16(r);
+        r_rsv(r, 2);
+        c[i].reserved = 0;
         c[i].a = r_f64(r);
         c[i].b = r_f64(r);
     }
@@ -424,7 +515,8 @@ static void dec_reliable_cmd(R *r, XtkReliableCmd *m)
 {
     m->last_observed_server_tick = r_u32(r);
     m->command_count = r_u16(r);
-    m->reserved = r_u16(r);
+    r_rsv(r, 2);
+    m->reserved = 0;
     r_count(r, m->command_count, XTK_MAX_INPUT_COMMANDS_PER_BATCH);
     dec_commands(r, m->command, m->command_count);
 }
@@ -434,7 +526,8 @@ static void dec_input_batch(R *r, XtkInputBatch *m)
     m->packet_sequence = r_u32(r);
     m->last_observed_server_tick = r_u32(r);
     m->command_count = r_u16(r);
-    m->reserved = r_u16(r);
+    r_rsv(r, 2);
+    m->reserved = 0;
     r_count(r, m->command_count, XTK_MAX_INPUT_COMMANDS_PER_BATCH);
     dec_commands(r, m->command, m->command_count);
 }
@@ -446,7 +539,9 @@ static void dec_view_snapshot(R *r, XtkViewSnapshot *m)
     m->server_tick = r_u32(r);
     m->flags = r_u16(r);
     m->own_slot = r_u8(r);
-    m->own_generation = r_u8(r);
+    r_rsv(r, 1);
+    m->reserved = 0;
+    m->own_generation = r_u32(r);
     m->vehicle_count = r_u16(r);
     m->bullet_count = r_u16(r);
     m->explosion_count = r_u16(r);
@@ -467,7 +562,8 @@ static void dec_view_snapshot(R *r, XtkViewSnapshot *m)
     }
 
     m->self.slot = r_u8(r);
-    m->self.generation = r_u8(r);
+    r_rsv(r, 1);
+    m->self.reserved = 0;
     m->self.lifecycle_flags = r_u16(r);
     for (i = 0; i < XTK_ARMOR_SIDES; ++i) m->self.armor[i] = r_u16(r);
     m->self.fuel = r_u16(r);
@@ -477,12 +573,14 @@ static void dec_view_snapshot(R *r, XtkViewSnapshot *m)
     m->self.weapon_enabled_bitmap = r_u8(r);
     m->self.weapon_count = r_u8(r);
     for (i = 0; i < XTK_MAX_WEAPONS; ++i) m->self.reload[i] = r_u16(r);
-    r_bytes(r, m->self.reserved, 2);
+    m->self.generation = r_u32(r);
+    r_rsv(r, 2);
 
     for (i = 0; i < m->vehicle_count && r->err == XTK_ERR_NONE; ++i) {
         XtkVehicleView *v = &m->vehicle[i];
         v->slot = r_u8(r);
-        v->generation = r_u8(r);
+        r_rsv(r, 1);
+        v->reserved = 0;
         v->kind = r_u8(r);
         v->flags = r_u8(r);
         v->x = r_f64(r);
@@ -491,7 +589,8 @@ static void dec_view_snapshot(R *r, XtkViewSnapshot *m)
         v->turret_angle = r_f64(r);
         v->body_picture = r_u16(r);
         v->turret_picture = r_u16(r);
-        r_bytes(r, v->reserved, 4);
+        v->generation = r_u32(r);
+        r_rsv(r, 4);
     }
     for (i = 0; i < m->bullet_count && r->err == XTK_ERR_NONE; ++i) {
         XtkBulletView *b = &m->bullet[i];
@@ -501,9 +600,11 @@ static void dec_view_snapshot(R *r, XtkViewSnapshot *m)
         b->y = r_f64(r);
         b->heading = r_f64(r);
         b->owner_slot = r_u8(r);
-        b->owner_generation = r_u8(r);
         b->kind = r_u8(r);
-        b->reserved = r_u8(r);
+        r_rsv(r, 2);
+        b->reserved = 0;
+        b->generation = r_u32(r);
+        b->owner_generation = r_u32(r);
     }
     for (i = 0; i < m->explosion_count && r->err == XTK_ERR_NONE; ++i) {
         XtkExplosionView *e = &m->explosion[i];
@@ -512,7 +613,8 @@ static void dec_view_snapshot(R *r, XtkViewSnapshot *m)
         e->flags = r_u8(r);
         e->x = r_f64(r);
         e->y = r_f64(r);
-        r_bytes(r, e->reserved, 4);
+        e->generation = r_u32(r);
+        r_rsv(r, 4);
     }
     for (i = 0; i < m->map_cell_count && r->err == XTK_ERR_NONE; ++i) {
         XtkMapCell *c = &m->cell[i];
@@ -524,11 +626,16 @@ static void dec_view_snapshot(R *r, XtkViewSnapshot *m)
     for (i = 0; i < m->landmark_count && r->err == XTK_ERR_NONE; ++i) {
         XtkLandmarkView *l = &m->landmark[i];
         l->kind = r_u8(r);
-        l->id = r_u8(r);
-        l->reserved = r_u16(r);
+        l->grid_x = r_u8(r);
+        l->grid_y = r_u8(r);
+        r_rsv(r, 1);
+        l->reserved = 0;
         l->x = r_f64(r);
         l->y = r_f64(r);
-        r_bytes(r, l->reserved2, 4);
+        l->id = r_u16(r);
+        r_rsv(r, 2);
+        l->reserved2 = 0;
+        r_rsv(r, 4);
     }
     for (i = 0; i < m->radar_blip_count && r->err == XTK_ERR_NONE; ++i) {
         XtkRadarBlip *b = &m->radar[i];
@@ -536,7 +643,8 @@ static void dec_view_snapshot(R *r, XtkViewSnapshot *m)
         b->y = r_f64(r);
         b->age = r_u8(r);
         b->classification = r_u8(r);
-        b->reserved = r_u16(r);
+        r_rsv(r, 2);
+        b->reserved = 0;
     }
 }
 
@@ -570,10 +678,14 @@ int xtk_decode(const uint8_t *buf, size_t len, XtkMessage *msg)
                              dec_config_select(&r, &msg->body.config_select); break;
     case XTK_MSG_CONFIG_STATUS:
                              dec_config_status(&r, &msg->body.config_status); break;
-    case XTK_MSG_READY:      break;
+    case XTK_MSG_READY:      dec_ready(&r, &msg->body.ready); break;
     case XTK_MSG_START:      dec_start(&r, &msg->body.start); break;
+    case XTK_MSG_START_REQUEST:
+                             dec_start_request(&r, &msg->body.start_request); break;
     case XTK_MSG_EPOCH_BEGIN:
                              dec_epoch_begin(&r, &msg->body.epoch_begin); break;
+    case XTK_MSG_LOBBY_STATE:
+                             dec_lobby_state(&r, &msg->body.lobby_state); break;
     case XTK_MSG_RESULTS:    dec_results(&r, &msg->body.results); break;
     case XTK_MSG_RESET:      dec_reset(&r, &msg->body.reset); break;
     case XTK_MSG_QUIT:       break;
@@ -586,6 +698,7 @@ int xtk_decode(const uint8_t *buf, size_t len, XtkMessage *msg)
     case XTK_MSG_INPUT_BATCH:
                              dec_input_batch(&r, &msg->body.input_batch); break;
     case XTK_MSG_VIEW_SNAPSHOT:
+    case XTK_MSG_VIEW_KEYFRAME:
                              dec_view_snapshot(&r, &msg->body.view_snapshot); break;
     default:
         return XTK_ERR_BAD_TYPE;
