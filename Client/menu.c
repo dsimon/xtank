@@ -106,9 +106,53 @@ int menu_apply_message(XtkLobbyState *ls, XtkResultsState *rs,
 	switch (msg->env.message_type) {
 	case XTK_MSG_WELCOME:
 		ls->connected = 1;
-		/* The one-peer slice's first/only peer administers (D2-F); the
-		 * WELCOME role distinguishes observer/player, not admin. */
-		ls->is_admin = (msg->body.welcome.role == 1) ? 1 : 0;
+		/* The WELCOME role is observer/player only; it never grants
+		 * administrator (P3.10).  Authority arrives in LOBBY_STATE. */
+		ls->is_admin = 0;
+		return 1;
+	case XTK_MSG_LOBBY_STATE:
+		ls->have_lobby_state = 1;
+		ls->self_index = msg->body.lobby_state.self_index;
+		ls->admin_index = msg->body.lobby_state.admin_index;
+		ls->session_state = msg->body.lobby_state.session_state;
+		ls->drone_count = msg->body.lobby_state.drone_count;
+		ls->selected_drone_count =
+			msg->body.lobby_state.drone_count;
+		ls->is_admin =
+			(msg->body.lobby_state.admin_index != 0xFF &&
+			 msg->body.lobby_state.admin_index ==
+			 msg->body.lobby_state.self_index) ? 1 : 0;
+		/* D3-B: a config revision change wipes every peer's readiness. */
+		if (msg->body.lobby_state.config_revision !=
+		    ls->config_revision) {
+			ls->ready = 0;
+		}
+		ls->config_revision = msg->body.lobby_state.config_revision;
+		if (msg->body.lobby_state.maze_id != 0) {
+			ls->selected_maze_id = msg->body.lobby_state.maze_id;
+			ls->selected_vehicle_id =
+				msg->body.lobby_state.vehicle_id;
+		}
+		{
+			int i;
+			int n = msg->body.lobby_state.human_count;
+			if (n > (int)XTK_LOBBY_ROSTER_MAX) {
+				n = (int)XTK_LOBBY_ROSTER_MAX;
+			}
+			ls->roster_count = n;
+			for (i = 0; i < n; i++) {
+				ls->roster[i] = msg->body.lobby_state.entry[i];
+			}
+			/* Readiness is server-authored per roster entry. */
+			for (i = 0; i < n; i++) {
+				if (i == (int)msg->body.lobby_state.self_index) {
+					ls->ready =
+						msg->body.lobby_state.entry[i]
+							.ready ? 1 : 0;
+					break;
+				}
+			}
+		}
 		return 1;
 	case XTK_MSG_CONTENT_CATALOG:
 		ls->have_catalog = 1;
@@ -131,8 +175,14 @@ int menu_apply_message(XtkLobbyState *ls, XtkResultsState *rs,
 		ls->have_config = 1;
 		ls->selected_maze_id = msg->body.config_status.maze_id;
 		ls->selected_vehicle_id = msg->body.config_status.vehicle_id;
+		ls->selected_drone_count = msg->body.config_status.drone_count;
 		ls->config_status = msg->body.config_status.status;
 		ls->config_error = msg->body.config_status.error_code;
+		if (msg->body.config_status.config_revision !=
+		    ls->config_revision) {
+			ls->ready = 0;
+		}
+		ls->config_revision = msg->body.config_status.config_revision;
 		if (ls->config_status == 0) {
 			ls->have_error = 0;
 		}
@@ -140,19 +190,26 @@ int menu_apply_message(XtkLobbyState *ls, XtkResultsState *rs,
 	case XTK_MSG_CONFIG_SELECT:
 		ls->selected_maze_id = msg->body.config_select.maze_id;
 		ls->selected_vehicle_id = msg->body.config_select.vehicle_id;
+		ls->selected_drone_count = msg->body.config_select.drone_count;
 		return 1;
 	case XTK_MSG_RESULTS:
+		ls->session_state = (uint8_t)XTK_SESSION_RESULTS;
+		ls->ready = 0;
 		if (rs != NULL) {
 			rs->have_results = 1;
 			rs->results = msg->body.results;
 		}
 		return 1;
 	case XTK_MSG_RESET:
+		ls->session_state = (uint8_t)XTK_SESSION_LOBBY;
+		ls->ready = 0;
 		if (rs != NULL) {
 			menu_results_init(rs);
 		}
 		return 1;
+	case XTK_MSG_START:
 	case XTK_MSG_EPOCH_BEGIN:
+		ls->session_state = (uint8_t)XTK_SESSION_RUNNING;
 		ls->ready = 0;
 		if (rs != NULL) {
 			menu_results_init(rs);
@@ -201,6 +258,36 @@ int menu_lobby_select_vehicle(XtkLobbyState *ls, uint16_t vehicle_id)
 	}
 	ls->selected_vehicle_id = vehicle_id;
 	return 0;
+}
+
+int menu_lobby_select_drones(XtkLobbyState *ls, uint8_t drone_count)
+{
+	if (ls == NULL) {
+		return -1;
+	}
+	if (drone_count > (uint8_t)XTK_MAX_DRONES) {
+		return -1;
+	}
+	ls->selected_drone_count = drone_count;
+	return 0;
+}
+
+int menu_lobby_can_config(const XtkLobbyState *ls)
+{
+	return ls != NULL && ls->connected && ls->is_admin &&
+	       ls->session_state == (uint8_t)XTK_SESSION_LOBBY;
+}
+
+int menu_lobby_can_start(const XtkLobbyState *ls)
+{
+	return ls != NULL && ls->connected && ls->is_admin &&
+	       ls->session_state == (uint8_t)XTK_SESSION_LOBBY;
+}
+
+int menu_lobby_can_reset(const XtkLobbyState *ls)
+{
+	return ls != NULL && ls->connected && ls->is_admin &&
+	       ls->session_state != (uint8_t)XTK_SESSION_LOBBY;
 }
 
 const char *menu_lobby_maze_name(const XtkLobbyState *ls, uint16_t maze_id)
@@ -292,7 +379,41 @@ int menu_build_lobby(const XtkLobbyState *ls, XtkUiScene *s)
 		ui_add_text(s, XTK_UI_GAME_X + XTK_UI_BORDER, y, XTK_FONT_SMALL,
 			    XTK_UI_WHITE, buf);
 		y += ui_font_height(XTK_FONT_SMALL);
+		snprintf(buf, sizeof(buf), "Drones:  %u",
+			 (unsigned)(ls != NULL ? ls->selected_drone_count : 0));
+		ui_add_text(s, XTK_UI_GAME_X + XTK_UI_BORDER, y, XTK_FONT_SMALL,
+			    XTK_UI_WHITE, buf);
 		y += ui_font_height(XTK_FONT_SMALL);
+		snprintf(buf, sizeof(buf), "Config rev:  %u",
+			 (unsigned)(ls != NULL ? ls->config_revision : 0));
+		ui_add_text(s, XTK_UI_GAME_X + XTK_UI_BORDER, y, XTK_FONT_SMALL,
+			    XTK_UI_WHITE, buf);
+		y += ui_font_height(XTK_FONT_SMALL);
+	}
+
+	/* Server-authored roster: each player's name, role and readiness. */
+	if (ls != NULL && ls->have_lobby_state) {
+		y = XTK_UI_MSG_Y + XTK_UI_BORDER;
+		ui_add_text(s, XTK_UI_MSG_X + XTK_UI_BORDER, y, XTK_FONT_SMALL,
+			    XTK_UI_WHITE, "Players:");
+		y += ui_font_height(XTK_FONT_SMALL);
+		for (i = 0; i < ls->roster_count; i++) {
+			const XtkRosterEntry *e = &ls->roster[i];
+			uint32_t color =
+				(e->flags & XTK_FLAG_DEPARTED)
+					? XTK_UI_GREY
+					: (i == ls->self_index ? XTK_UI_GREEN
+							       : XTK_UI_WHITE);
+			snprintf(buf, sizeof(buf), "%s%s %s",
+				 (i == ls->admin_index) ? "*" : " ",
+				 e->name[0] != '\0' ? e->name : "player",
+				 (e->flags & XTK_FLAG_DEPARTED)
+					? "left"
+					: (e->ready ? "ready" : "waiting"));
+			ui_add_text(s, XTK_UI_MSG_X + XTK_UI_BORDER, y,
+				    XTK_FONT_SMALL, color, buf);
+			y += ui_font_height(XTK_FONT_SMALL);
+		}
 	}
 
 	/* Lobby status: connection, admin/ready and the last refusal. */
