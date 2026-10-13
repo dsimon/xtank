@@ -108,6 +108,16 @@ void intent_init(void);
 void intent_reset(void);
 
 /*
+ * Cancel one controller's pending and held input (P3.7 departure).  Drops every
+ * queued intent tagged with `player`, clears that controller's held aim / chase
+ * / standoff / fire and its anti-wedge bookkeeping, and leaves every other
+ * controller's queue and held state untouched.  A peer-scoped cancel is
+ * required on departure so a removed tank cannot fire or drive from stale
+ * input; the all-or-nothing intent_reset() would also wipe the survivor.
+ */
+void intent_cancel_player(int player);
+
+/*
  * Submit an intent.  Returns INTENT_OK or a negative IntentStatus; a rejected
  * intent never changes queue or held-control state.
  */
