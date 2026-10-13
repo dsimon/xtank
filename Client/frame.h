@@ -87,15 +87,42 @@ void frame_focus(XtkFrame *f, int focused);
 
 /* ---- lobby / admin --------------------------------------------------- */
 
-/* Auto-select the first available maze/Vanguard and send READY (default on). */
+/* Auto-select the first available maze/Vanguard and send READY (default on).
+ * Suppressed on a multi-human server so a solo auto-start cannot race the
+ * second player (P3.10). */
 void frame_set_auto_lobby(XtkFrame *f, int on);
-/* Manually select a catalog configuration (validated against the catalog). */
+
+/*
+ * Manually select a catalog configuration (validated against the catalog and
+ * only sent by the server-authored administrator).  `drones` is 0..2 (D3-B);
+ * frame_lobby_select() keeps the current drone count.  Returns 0 when sent,
+ * -1 when refused locally (not admin / no catalog / bad selection).
+ */
 int  frame_lobby_select(XtkFrame *f, uint16_t maze_id, uint16_t vehicle_id);
+int  frame_lobby_select_config(XtkFrame *f, uint16_t maze_id,
+			       uint16_t vehicle_id, uint8_t drones);
+
+/* Explicit ready toggle (any admitted player) against the current revision. */
+int  frame_ready(XtkFrame *f, int ready);
+
+/* Administrator start request (only the server-authored admin). */
+int  frame_request_start(XtkFrame *f);
 
 /* Admin reset (epoch+1) and quit. */
 int  frame_request_reset(XtkFrame *f);
 int  frame_request_quit(XtkFrame *f);
 int  frame_quit_requested(const XtkFrame *f);
+
+/*
+ * Drop the current connection and return to Connect so a failed/disconnected
+ * client can rejoin a fresh lobby in-process (no restart).
+ */
+void frame_reconnect(XtkFrame *f);
+
+/* Presentation-side control gates (mirror menu_lobby_can_*; server is boss). */
+int  frame_can_config(const XtkFrame *f);
+int  frame_can_start(const XtkFrame *f);
+int  frame_can_reset(const XtkFrame *f);
 
 /*
  * One nonblocking iteration.  Pumps the session and handles messages, maps the
