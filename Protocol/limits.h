@@ -1,13 +1,18 @@
 /*
- * Protocol/limits.h -- Xtank wire protocol v1 bounds (P2.2).
+ * Protocol/limits.h -- Xtank wire protocol bounds.
  *
- * These are the frozen numeric limits of the version 1 wire protocol.  They
- * are deliberately self-contained: nothing in Protocol/ may include engine,
+ * These are the frozen numeric limits of the wire protocol.  They are
+ * deliberately self-contained: nothing in Protocol/ may include engine,
  * SDL or ENet headers, and these values are independent copies of any
  * simulation or transport constant of the same number.  A change here is a
- * protocol change and requires a new owner decision (D2-C).
+ * protocol change and requires a new owner decision.
  *
- * Authority: docs/PROTOCOL-v1.md, docs/PHASE2-PLAN.md section 3.
+ * Version 1.0 bounds were frozen by P2.2 (D2-C); the version 1.1 additions
+ * are frozen by P3.3 (D3-A..D3-F).  Values that v1.1 did not change are
+ * carried forward byte-for-byte.
+ *
+ * Authority: docs/PROTOCOL-v1.md, docs/PROTOCOL-v1.1.md,
+ * docs/PHASE2-PLAN.md section 3, docs/PHASE3-PLAN.md section 3 (P3.3).
  */
 
 #ifndef XTK_PROTOCOL_LIMITS_H
@@ -91,5 +96,24 @@
 
 /* One human + one drone in the Phase 2 slice, up to the release maximum. */
 #define XTK_MAX_PLAYERS                  4u
+
+/* ---- Protocol v1.1 session / lifetime bounds (P3.3) ------------------ */
+
+/* Admitted human controllers in a release session (D3-B/D3-E).  This is the
+ * human capacity advertised by WELCOME and the roster bound of LOBBY_STATE;
+ * it is independent of the vehicle preset bound XTK_MAX_PLAYERS. */
+#define XTK_MAX_HUMANS                   2u
+
+/* Selectable local drones (D3-B): admin chooses 0..2 for two humans; a solo
+ * human fixes exactly one. */
+#define XTK_MAX_DRONES                   2u
+#define XTK_SOLO_DRONES                  1u
+
+/* Roster records in one LOBBY_STATE message (D3-C). */
+#define XTK_LOBBY_ROSTER_MAX             XTK_MAX_HUMANS
+
+/* Bounded pre-match handshake deadline; an abandoned peer slot is reclaimed
+ * after this many milliseconds without valid handshake/lobby traffic (D3-E). */
+#define XTK_HANDSHAKE_TIMEOUT_MS         3000U
 
 #endif /* XTK_PROTOCOL_LIMITS_H */
