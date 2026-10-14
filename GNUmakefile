@@ -119,6 +119,30 @@ phase2-check:
 	XTANK_P2_EVIDENCE="$(PHASE2_EVIDENCE)" \
 	  bash Tests/phase2/phase2-check.sh $$args
 
+# ---------------------------------------------------------------------------
+# P3.16 -- Phase 3 exit gate.  Runs the full Phase 1 gate, the inherited Phase 2
+# drivers/package checks, the P3.2-P3.12 drivers, explicit Linux/MinGW client
+# builds, sanitizer/fuzz and the Phase 3 packages (Bin/package-phase3.sh +
+# Tests/phase3/package.sh), fail-fast and machine-readable
+# (gate-results.{tsv,json}).  Add OPERATIONAL=1 to enforce the P3.13/P3.14/P3.15
+# operational evidence attached against the same manifest.
+#
+# The native Windows two-PC owner exit (ten two-human matches, solo on real
+# hardware, install/feel sign-off) CANNOT run here and is recorded BLOCKED; a
+# Linux automated PASS is not the two-PC exit PASS.
+#
+# Usage: make phase3-check [PHASE3_EVIDENCE=DIR] [OPERATIONAL=1]
+# ---------------------------------------------------------------------------
+PHASE3_EVIDENCE ?= /tmp/opencode/xtank-phase3/p16/gate
+OPERATIONAL ?= 0
+
+phase3-check:
+	@args=""; \
+	if [ "$(OPERATIONAL)" = "1" ]; then args="--operational"; fi; \
+	env -u MAKEFLAGS -u MFLAGS \
+	  XTANK_P3_EVIDENCE="$(PHASE3_EVIDENCE)" \
+	  bash Tests/phase3/phase3-check.sh $$args
+
 .PHONY: all clean install phase1-headless phase1-server phase1-core \
 	phase1-check phase2-client-linux phase2-client-win \
-	phase2-client-clean phase2-check ${SUBDIR}
+	phase2-client-clean phase2-check phase3-check ${SUBDIR}
