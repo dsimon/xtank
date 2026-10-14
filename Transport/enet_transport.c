@@ -16,10 +16,53 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include <enet/enet.h>
 
+#if defined(_WIN32)
+/* MinGW-w64's win32-thread model has no clock_gettime() implementation and the
+ * client must not depend on libwinpthread-1.dll (D2-D clean-machine contract),
+ * so the optional P3.13 timing uses the monotonic Win32 performance counter. */
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
 #include "transport.h"
+
+/* P3.13 bounded read-only ENet timing; off unless the harness asks for it. */
+static int
+tx_timing_on(void)
+{
+	static int init, on;
+
+	if (!init) {
+		init = 1;
+		on = (getenv("XTANK_TIMING") != (char *) NULL);
+	}
+	return on;
+}
+
+static unsigned long long
+tx_now_ns(void)
+{
+#if defined(_WIN32)
+	LARGE_INTEGER freq, ctr;
+
+	QueryPerformanceFrequency(&freq);
+	QueryPerformanceCounter(&ctr);
+	return (unsigned long long)
+	    ((double) ctr.QuadPart * 1000000000.0 / (double) freq.QuadPart);
+#else
+	struct timespec ts;
+
+	(void) clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (unsigned long long) ts.tv_sec * 1000000000ULL +
+	       (unsigned long long) ts.tv_nsec;
+#endif
+}
 
 /* Three protocol channels: 0 reliable ordered, 1/2 unreliable sequenced. */
 #define TRANSPORT_CHANNELS	3
@@ -255,11 +298,15 @@ int
 transport_service(Transport *t, int budget)
 {
 	int n = 0;
+	unsigned long long service_t0 = 0;
 
 	if (t == (Transport *) NULL || t->host == (ENetHost *) NULL)
 		return -1;
 	if (budget <= 0)
 		budget = 1;
+
+	if (tx_timing_on())
+		service_t0 = tx_now_ns();
 
 	t->stats.service_calls++;
 	while (n < budget) {
@@ -336,6 +383,8 @@ transport_service(Transport *t, int budget)
 	t->stats.service_events += (unsigned long) n;
 	if ((unsigned long) n > t->stats.service_max_events)
 		t->stats.service_max_events = (unsigned long) n;
+	if (service_t0 != 0)
+		t->stats.ns_service += tx_now_ns() - service_t0;
 	return n;
 }
 
@@ -408,12 +457,15 @@ transport_send(Transport *t, TransportPeer *peer, uint8_t channel,
 {
 	ENetPacket *pkt;
 	enet_uint32 flags;
+	unsigned long long send_t0;
 
 	if (t == (Transport *) NULL || peer == (TransportPeer *) NULL ||
 	    peer->enet == (ENetPeer *) NULL || channel >= TRANSPORT_CHANNELS)
 		return -1;
 	if (len > TRANSPORT_MAX_PACKET)
 		return -1;
+
+	send_t0 = tx_timing_on() ? tx_now_ns() : 0;
 
 	/*
 	 * D3-F: channel 0 is reliable ordered; channels 1 and 2 are unreliable
@@ -440,6 +492,8 @@ transport_send(Transport *t, TransportPeer *peer, uint8_t channel,
 	enet_host_flush(t->host);
 	t->stats.packets_tx++;
 	t->stats.bytes_tx += len;
+	if (send_t0 != 0)
+		t->stats.ns_send += tx_now_ns() - send_t0;
 	return 0;
 }
 
@@ -520,4 +574,9 @@ transport_stats(Transport *t, TransportStats *out)
 	if (t == (Transport *) NULL || out == (TransportStats *) NULL)
 		return;
 	*out = t->stats;
+	if (t->host != (ENetHost *) NULL) {
+		/* Read-only ENet host wire totals (P3.13). */
+		out->tx_wire_bytes += (unsigned long long) t->host->totalSentData;
+		out->tx_wire_packets += (unsigned long long) t->host->totalSentPackets;
+	}
 }
