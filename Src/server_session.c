@@ -69,6 +69,19 @@ extern Vehicle actual_vehicles[];
 extern Vehicle *live_vehicles[];
 extern Vehicle *dead_vehicles[];
 
+/*
+ * P3.13 bounded read-only component timing.  Provided by server_loop.c and
+ * enabled only by a measurement harness; no simulation state is touched.
+ * Component indices must match SERVER_TIMING_* in server_loop.c.
+ */
+#define TIMING_SERVICE	0
+#define TIMING_SIM	1
+#define TIMING_EXPORT	2
+#define TIMING_ENCODE	3
+extern int server_timing_enabled(void);
+extern long long server_timing_now_ns(void);
+extern void server_timing_note(int component, long long ns);
+
 #define SERVER_SESSION_STEP_BUDGET	XTK_MAX_SERVICE_WORK_PER_TICK
 
 /*
@@ -136,6 +149,10 @@ struct ServerSession {
 	int reply_count;
 	size_t reply_len[SERVER_SESSION_REPLY_MAX];
 	uint8_t reply_buf[SERVER_SESSION_REPLY_MAX][SERVER_SESSION_REPLY_BYTES];
+
+	/* P3.13 read-only per-peer transmitted application bytes/messages. */
+	uint64_t tx_bytes;
+	uint64_t tx_messages;
 };
 
 /* Shared coordinator: exactly one world/config/epoch/administrator. */
@@ -431,6 +448,9 @@ session_emit(ServerSession *s, const XtkMessage *m)
 				   xtk_next_channel(m->env.message_type),
 				   txbuf, len) != 0)
 			return 0;
+		/* P3.13 read-only per-peer wire accounting (application bytes). */
+		s->tx_bytes += (uint64_t) len;
+		s->tx_messages++;
 	}
 	if (len <= SERVER_SESSION_REPLY_BYTES &&
 	    s->reply_count < SERVER_SESSION_REPLY_MAX) {
@@ -456,6 +476,19 @@ server_session_reply(const ServerSession *s, int index, XtkMessage *out)
 		return -1;
 	return (xtk_decode(s->reply_buf[index], s->reply_len[index], out) ==
 		XTK_ERR_NONE) ? 0 : -1;
+}
+
+/* P3.13 read-only per-peer wire counters (application bytes/messages). */
+uint64_t
+server_session_tx_bytes(const ServerSession *s)
+{
+	return (s != (const ServerSession *) NULL) ? s->tx_bytes : 0;
+}
+
+uint64_t
+server_session_tx_messages(const ServerSession *s)
+{
+	return (s != (const ServerSession *) NULL) ? s->tx_messages : 0;
 }
 
 void
@@ -1527,6 +1560,8 @@ int
 server_session_step(ServerSession *s, uint64_t t)
 {
 	int status, i;
+	int timing = server_timing_enabled();
+	long long t0;
 
 	(void) s;
 	if (lobby.state != SERVER_SESSION_RUNNING)
@@ -1549,13 +1584,24 @@ server_session_step(ServerSession *s, uint64_t t)
 	if (lobby.state != SERVER_SESSION_RUNNING)
 		return GAME_OVER;
 
+	t0 = timing ? server_timing_now_ns() : 0;
 	status = server_step();
 	server_events_observe();
+	if (timing) {
+		server_timing_note(TIMING_SIM, server_timing_now_ns() - t0);
+		t0 = server_timing_now_ns();
+	}
 	server_net_post_step(frame);
+	if (timing) {
+		server_timing_note(TIMING_ENCODE, server_timing_now_ns() - t0);
+		t0 = server_timing_now_ns();
+	}
 	for (i = 0; i < SERVER_SESSION_MAX_PEERS; i++) {
 		if (peer_active(&peers[i]))
 			session_deliver(&peers[i]);
 	}
+	if (timing)
+		server_timing_note(TIMING_EXPORT, server_timing_now_ns() - t0);
 
 	if (status != GAME_RUNNING)
 		server_session_finish(s, status);
@@ -1654,6 +1700,8 @@ server_session_service(uint64_t t)
 	ServerSession *s;
 	TransportPeer *p;
 	int events = 0, i;
+	int timing = server_timing_enabled();
+	long long t0 = timing ? server_timing_now_ns() : 0;
 
 	/* Fresh per-tick admission quotas and the rotating peer-first cursor. */
 	server_net_begin_tick(frame + 1);
@@ -1717,6 +1765,8 @@ server_session_service(uint64_t t)
 		(void) server_session_begin(server_session_current(),
 					    (uint32_t) (frame + 1), t);
 
+	if (timing)
+		server_timing_note(TIMING_SERVICE, server_timing_now_ns() - t0);
 	return events;
 }
 
