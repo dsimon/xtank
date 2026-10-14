@@ -68,6 +68,21 @@ typedef struct {
 	unsigned long wrappers_reused;		/* pool slots handed out again */
 	unsigned long rx_queue_max;		/* high-water rx queue depth  */
 	unsigned long unreliable_fragments;	/* ch1/2 packets over one MTU */
+	/*
+	 * P3.13 bounded read-only ENet service/output timing (nanoseconds).
+	 * Only accumulated when the measurement harness sets XTANK_TIMING;
+	 * otherwise both stay 0 and no clock is read.
+	 */
+	unsigned long long ns_service;		/* inside transport_service */
+	unsigned long long ns_send;		/* inside transport_send     */
+	/*
+	 * P3.13 read-only ENet wire totals from the host counters: UDP payload
+	 * bytes/packets ENet actually sent (including ENet command headers and
+	 * fragmentation).  Compared against bytes_tx they expose the real wire
+	 * fragment/header overhead, not the theoretical packet size.
+	 */
+	unsigned long long tx_wire_bytes;
+	unsigned long long tx_wire_packets;
 } TransportStats;
 
 /*
