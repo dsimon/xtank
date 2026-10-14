@@ -111,6 +111,129 @@ now_ns(void)
 	return (long long) ts.tv_sec * 1000000000LL + (long long) ts.tv_nsec;
 }
 
+/*
+ * P3.13 bounded read-only component timing.  Disabled by default; when a
+ * harness enables it, server_session_step()/server_session_service() note the
+ * wall time of each mutually-exclusive phase so the total per-tick work (which
+ * excludes the deliberate pace sleep) can be broken down:
+ *
+ *   0 service  ingress/service/admission  (server_session_service)
+ *   1 sim      simulation step            (server_step + event observe)
+ *   2 export   per-peer state export      (session_deliver)
+ *   3 encode   event/ack encoding +flush  (server_net_post_step)
+ *
+ * ENet service/output is reported separately from the transport counters
+ * (TransportStats.ns_service/ns_send).  This never reads or writes simulation
+ * state, so it cannot change the authoritative bytes.
+ */
+#define SERVER_TIMING_COMPONENTS	4
+static unsigned long timing_hist[SERVER_TIMING_COMPONENTS][LOOP_WORK_BUCKETS];
+static long long timing_max_ns[SERVER_TIMING_COMPONENTS];
+static long long timing_sum_ns[SERVER_TIMING_COMPONENTS];
+static long timing_samples[SERVER_TIMING_COMPONENTS];
+static int timing_on;
+
+void
+server_timing_enable(int on)
+{
+	timing_on = on ? 1 : 0;
+}
+
+int
+server_timing_enabled(void)
+{
+	return timing_on;
+}
+
+void
+server_timing_reset(void)
+{
+	int c;
+
+	for (c = 0; c < SERVER_TIMING_COMPONENTS; c++) {
+		(void) memset(timing_hist[c], 0, sizeof(timing_hist[c]));
+		timing_max_ns[c] = timing_sum_ns[c] = 0;
+		timing_samples[c] = 0;
+	}
+}
+
+long long
+server_timing_now_ns(void)
+{
+	return now_ns();
+}
+
+void
+server_timing_note(int component, long long ns)
+{
+	long bucket;
+
+	if (component < 0 || component >= SERVER_TIMING_COMPONENTS)
+		return;
+	if (ns < 0)
+		ns = 0;
+	timing_samples[component]++;
+	timing_sum_ns[component] += ns;
+	if (ns > timing_max_ns[component])
+		timing_max_ns[component] = ns;
+	bucket = (long) (ns / LOOP_WORK_BUCKET_NS);
+	if (bucket >= LOOP_WORK_BUCKETS)
+		bucket = LOOP_WORK_BUCKETS - 1;
+	timing_hist[component][bucket]++;
+}
+
+/* Upper-bucket-edge percentile (nanoseconds) from a component histogram. */
+static long long
+timing_percentile(int component, int pct)
+{
+	unsigned long target, cum = 0;
+	long i;
+
+	if (timing_samples[component] == 0)
+		return 0;
+	target = (unsigned long)
+		 ((timing_samples[component] * (long) pct + 99) / 100);
+	for (i = 0; i < LOOP_WORK_BUCKETS; i++) {
+		cum += timing_hist[component][i];
+		if (cum >= target)
+			return (long long) (i + 1) * LOOP_WORK_BUCKET_NS;
+	}
+	return timing_max_ns[component];
+}
+
+static const char *const timing_name[SERVER_TIMING_COMPONENTS] = {
+	"service", "sim", "export", "encode"
+};
+
+void
+server_timing_report(const char *path)
+{
+	FILE *fp = stderr;
+	int c;
+
+	if (path != NULL) {
+		FILE *f = fopen(path, "w");
+
+		if (f != NULL)
+			fp = f;
+	}
+	for (c = 0; c < SERVER_TIMING_COMPONENTS; c++) {
+		double avg = timing_samples[c] ?
+			(double) timing_sum_ns[c] / timing_samples[c] / 1000.0 : 0.0;
+
+		fprintf(fp, "TIMING comp=%s samples=%ld avg_us=%.1f "
+			"p50_us=%.1f p95_us=%.1f p99_us=%.1f max_us=%.1f\n",
+			timing_name[c], timing_samples[c], avg,
+			(double) timing_percentile(c, 50) / 1000.0,
+			(double) timing_percentile(c, 95) / 1000.0,
+			(double) timing_percentile(c, 99) / 1000.0,
+			(double) timing_max_ns[c] / 1000.0);
+	}
+	fflush(fp);
+	if (fp != stderr)
+		fclose(fp);
+}
+
 void
 server_loop_configure(int hz)
 {
